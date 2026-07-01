@@ -51,6 +51,12 @@ Minecraft-Bedrock-C418/
 ./update.ps1
 ```
 
+## CI
+
+- GitHub Actions runs `bash scripts/validate.sh` on push and pull request events.
+- The workflow packages `mod/` into `dist/Poly-C418-Fixes.mcpack` and uploads it as a GitHub Actions artifact.
+- No repository secrets are required for validation or artifact upload.
+
 ## Installation
 
 1. Copy `mod/mod.mcpack` to device

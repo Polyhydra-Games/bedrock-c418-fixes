@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate repository
+        run: bash scripts/validate.sh
+
+      - name: Package mod artifact
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          python3 - <<'PY'
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          mod_root = Path("mod")
+          artifact = Path("dist/Poly-C418-Fixes.mcpack")
+          artifact.unlink(missing_ok=True)
+          with ZipFile(artifact, "w", compression=ZIP_DEFLATED) as zf:
+              for path in mod_root.rglob("*"):
+                  if path.is_file() and path.suffix != ".mcpack":
+                      zf.write(path, path.relative_to(mod_root))
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: minecraft-bedrock-c418-mcpack-${{ github.sha }}
+          path: dist/Poly-C418-Fixes.mcpack
+          if-no-files-found: error

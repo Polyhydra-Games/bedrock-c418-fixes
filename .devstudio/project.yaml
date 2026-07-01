@@ -1,12 +1,20 @@
-name: change-me
-repo_root: change-me
+name: Minecraft-Bedrock-C418
+repo_root: /mnt/data/lancer1977/code/Minecraft-Bedrock-C418
 
-languages: []
-frameworks: []
+languages:
+  - bash
+  - markdown
+  - powershell
+  - yaml
+frameworks:
+  - docs
+  - minecraft-bedrock
 
 ci:
-  build: []
-  test: []
+  build:
+    - bash scripts/validate.sh
+  test:
+    - bash scripts/validate.sh
 
 devstudio:
   runtime_model: three-agent
