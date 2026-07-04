@@ -9,6 +9,7 @@ required_paths=(
   "mod/manifest.json"
   "alpha.sh"
   "beta.sh"
+  "scripts/package.sh"
   "code_health.md"
   "docs/project-atlas/README.md"
   ".devstudio/project.yaml"
@@ -23,7 +24,14 @@ done
 
 bash -n alpha.sh
 bash -n beta.sh
+bash -n scripts/package.sh
 python3 -m json.tool mod/manifest.json >/dev/null
+
+tmp_dir="$(mktemp -d)"
+trap 'rm -rf "${tmp_dir}"' EXIT
+
+PACK_OUTPUT="${tmp_dir}/Poly-C418-Fixes.mcpack" bash scripts/package.sh >/dev/null
+zip -T "${tmp_dir}/Poly-C418-Fixes.mcpack" >/dev/null
 
 if command -v devstudio >/dev/null 2>&1; then
   devstudio validate --repo "$repo_root"

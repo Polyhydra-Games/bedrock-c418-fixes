@@ -2,6 +2,8 @@
 
 $convertedPath = Join-Path $PSScriptRoot "converted"
 $packRoot = Join-Path $PSScriptRoot "mod\sounds"
+$distPath = Join-Path $PSScriptRoot "dist"
+$mcpackPath = Join-Path $distPath "Poly-C418-Fixes.mcpack"
 
 $musicGame       = Join-Path $packRoot "music\game"
 $musicNether     = Join-Path $packRoot "music\nether"
@@ -68,17 +70,13 @@ Get-ChildItem -Path $convertedPath -Filter *.ogg | ForEach-Object {
     Write-Host "Copying $file to $dest"
     Copy-Item -Path $src -Destination $dest -Force
 }
-# Build .mcpack
-$mcpackName = "MyMusicPack.zip"
-$mcpackPath =   $mcpackName
+New-Item -ItemType Directory -Force -Path $distPath | Out-Null
 
 if (Test-Path $mcpackPath) {
     Remove-Item $mcpackPath -Force
 }
 
-Write-Host "`nPacking resource pack to $mcpackName..."
-Compress-Archive -Path "mod\*" -DestinationPath $mcpackPath
+Write-Host "`nPacking resource pack to $mcpackPath..."
+Compress-Archive -Path "mod\*" -DestinationPath $mcpackPath -Force
 
-Write-Host "✅ Done! Pack created: $mcpackName"
-Move-Item $mcpackName 
-Rename-Item -Path $mcpackName  -NewName "MyMusicPack1.mcpack"
+Write-Host "✅ Done! Pack created: $mcpackPath"
