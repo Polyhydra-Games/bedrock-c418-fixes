@@ -1,0 +1,14 @@
+{
+  "lastUpdated": "2026-07-06",
+  "name": "Minecraft-Bedrock-C418",
+  "repoLabel": "lancer1977/Minecraft-Bedrock-C418",
+  "schemaVersion": 1,
+  "slug": "minecraft-bedrock-c418",
+  "status": "active",
+  "summary": "Bedrock resource-pack home for the C418 music pack and packaging helpers.",
+  "tags": [
+    "game-support",
+    "shell",
+    "docs"
+  ]
+}
