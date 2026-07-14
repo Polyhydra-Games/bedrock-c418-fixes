@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 required_paths=(
-  "readme.md"
+  "README.md"
   "mod/manifest.json"
   "alpha.sh"
   "beta.sh"
