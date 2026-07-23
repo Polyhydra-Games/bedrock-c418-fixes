@@ -13,6 +13,7 @@ required_paths=(
   "scripts/package.py"
   "scripts/check_no_audio.py"
   "scripts/validate_runner_routing.py"
+  "scripts/validate_public_readiness_audit.py"
   "scripts/audit-public-readiness.sh"
   "LICENSE"
   "THIRD_PARTY_NOTICES.md"
@@ -37,6 +38,7 @@ bash -n scripts/audit-public-readiness.sh
 python3 -m json.tool mod/manifest.json >/dev/null
 python3 scripts/check_no_audio.py --repo "$repo_root" >/dev/null
 python3 scripts/validate_runner_routing.py >/dev/null
+python3 scripts/validate_public_readiness_audit.py >/dev/null
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "${tmp_dir}"' EXIT

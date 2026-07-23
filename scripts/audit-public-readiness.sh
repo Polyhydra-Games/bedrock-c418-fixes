@@ -48,7 +48,10 @@ report_file="${report_dir}/public-readiness-$(date -u +%Y%m%dT%H%M%SZ)-$(git -C 
 } >"$work_dir/history-and-inventory.txt" 2>&1
 
 set +e
-gitleaks git --source "$repo_root" --log-opts="--all" --redact --report-format json --report-path "$work_dir/gitleaks.json" >"$work_dir/gitleaks.stdout" 2>"$work_dir/gitleaks.stderr"
+# Gitleaks 8.30.0 takes the repository as the positional argument to `git`.
+# Keep scanner output exclusively in the protected work directory: findings
+# must never be emitted into the Actions log.
+gitleaks git "$repo_root" --log-opts="--all" --redact --report-format json --report-path "$work_dir/gitleaks.json" >"$work_dir/gitleaks.stdout" 2>"$work_dir/gitleaks.stderr"
 gitleaks_status=$?
 set -e
 
