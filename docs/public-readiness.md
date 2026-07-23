@@ -7,8 +7,12 @@ findings to logs, or run on forked pull requests.
 ## Preconditions
 
 - The candidate SHA is reviewed and the repository remains private.
-- The private runner has `git`, `gitleaks` version `8.30.0`, and a protected
-  operator-owned report volume outside the checkout.
+- The private runner has exactly the GitHub Actions labels `self-hosted`,
+  `Linux`, `X64`, `pr-validation`, and `minecraft-c418`, plus `git`,
+  `gitleaks` version `8.30.0`, and a protected operator-owned report volume
+  outside the checkout. These labels are selected only for owner-authored,
+  same-repository pull requests; forks and other untrusted pull requests use
+  hosted `ubuntu-latest` and receive no secret mapping.
 - The report directory is access-controlled to the audit/release owners. It is
   not a GitHub Actions artifact, repository path, issue attachment, or public
   log location.

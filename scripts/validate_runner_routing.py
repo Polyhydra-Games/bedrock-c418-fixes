@@ -6,7 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-TRUSTED_LABELS = '["self-hosted", "Linux", "X64", "docker"]'
+TRUSTED_LABELS = '["self-hosted", "Linux", "X64", "pr-validation", "minecraft-c418"]'
 TRUSTED_RUNNER_EXPRESSION = (
     "${{ ((github.event_name != 'pull_request') || "
     "(github.event.pull_request.head.repo.full_name == github.repository && "
