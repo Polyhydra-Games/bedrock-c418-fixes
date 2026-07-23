@@ -158,13 +158,16 @@ exact candidate commit and all reachable Git history. It must include:
 
 ### License, attribution, and content boundary
 
-- Add an explicit license only for rights the project owner controls. The
-  recommended code/documentation license is MIT, subject to product-owner/legal
-  confirmation; it grants no C418, Mojang, Microsoft, Bedrock, or third-party
-  asset rights.
+- Add SPDX `0BSD` (OSI-approved) for original repository code, manifests,
+  documentation, and `pack_icon.png` only after the icon's ownership is proven.
+  It is intentionally maximally permissive and carries the 0BSD AS-IS,
+  no-warranty, and no-liability terms. It grants no C418, Mojang, Microsoft,
+  Minecraft, Bedrock, or third-party asset rights.
 - Create an attribution and trademark notice that names the actual authors and
   rights basis for `pack_icon.png`, manifest text, scripts, and every distributed
-  asset. Unknown provenance blocks public distribution.
+  asset. Add `THIRD_PARTY_NOTICES.md` (or equivalent) as the durable boundary for
+  non-owned names, marks, and content; unknown provenance blocks public
+  distribution.
 - Use Minecraft, Bedrock, Mojang, Microsoft, and C418 names only descriptively
   where legally appropriate; include a non-affiliation/non-endorsement statement.
 - Do not distribute C418 recordings, derived audio, Minecraft game files, or
@@ -208,6 +211,20 @@ exact candidate commit and all reachable Git history. It must include:
 - The exact Infisical project/environment/path and CDN/Dread integration owner are
   unresolved; implementation cannot add a publishing credential until they are
   approved.
+
+## Delivery destination map
+
+| Destination | Role | Canonical identifier/contract | Promotion gate | Rollback owner |
+| --- | --- | --- | --- | --- |
+| `Polyhydra-Games/bedrock-c418-fixes` GitHub repository | Source, issue/review/CI authority, immutable release evidence | Approved final repo name; `main`; annotated `vX.Y.Z` release tag and commit SHA | Private transfer and exact-head safety recheck before public visibility | Organization administrator |
+| GitHub Release | Immutable source artifact | `Poly-C418-Fixes-vX.Y.Z.mcpack` plus `SHA256SUMS.txt`, bound to tag and source SHA | R1/R2/R4 green; separate release authority | Release owner; prior immutable release remains available |
+| Polyhydra CDN | Customer download transport | Approved hostname and immutable `/minecraft/bedrock-c418-fixes/releases/vX.Y.Z/` path serving the GitHub Release digest | Independent CDN download SHA-256 equals GitHub Release; cache policy reviewed | Delivery owner purges affected mutable index/path and withdraws bad route |
+| Dread catalog | Discovery, version/install/support record | Approved public catalog detail URL containing CDN URL, SHA-256, compatibility, license/notice, and support link | CDN digest evidence and approved catalog content | Catalog owner delists/withdraws entry and points to known-good version |
+| Supported Bedrock client | Actual customer consumption | One named platform and client version with sanitized import/enable/behavior proof | Fresh-client scenario S5 passes | Test/release owner marks version unsupported and updates catalog guidance |
+
+GitHub is not customer delivery merely because a release exists. The CDN and
+Dread catalog must advertise the exact immutable release bytes, and the supported
+client journey must pass before delivery is claimed.
 
 ## Verification map
 
@@ -258,7 +275,7 @@ follow the rights/security remediation decision instead of preserving the asset.
 | Rights to C418/Minecraft-related assets and claims | Product owner with rights/legal owner | Written provenance/rights decision for every distributed asset; absent proof blocks public artifact delivery. |
 | `pack_icon.png` provenance | Asset owner | Establish original/authorized source and license; replace it if unknown. |
 | Current pack has no audio/sound override payload | Product owner | Decide whether public V1 is an installation-only scaffold or defer release until lawful, verified behavior exists. Do not market it as music replacement otherwise. |
-| License choice | Product owner | Confirm a license for owned source/docs only and publish matching notices. |
+| 0BSD ownership boundary | Product owner and asset owner | Apply 0BSD only to original owned source/manifests/docs/icon after icon provenance is proved; publish `THIRD_PARTY_NOTICES.md` for all excluded names/content. |
 | Supported Bedrock client matrix | Product owner/test owner | Name at least one supported platform and client version before client proof. |
 | Dread catalog and CDN owner/path | Delivery owner | Approve exact catalog URL, CDN hostname/origin/path, cache policy, and support contact before implementation. |
 | Publishing credential source | Secret owner | Create only an Infisical stub after destination is approved; map least privilege secret by name, never value. |
