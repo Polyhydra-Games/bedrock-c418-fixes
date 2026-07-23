@@ -1,0 +1,20 @@
+0BSD License
+
+Copyright (c) 2026 Polyhydra Games contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
+REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
+AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
+INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+Scope: this license applies only to original, Polyhydra Games-owned repository
+source, manifests, and documentation. It does not grant rights to the
+unverified `mod/pack_icon.png` or to any Minecraft, Bedrock, Mojang, Microsoft,
+C418, music, game-content, trademark, or other third-party material. See
+THIRD_PARTY_NOTICES.md.

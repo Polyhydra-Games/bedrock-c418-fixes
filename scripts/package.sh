@@ -2,15 +2,16 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-source_dir="${repo_root}/mod"
-output_path="${PACK_OUTPUT:-${repo_root}/dist/Poly-C418-Fixes.mcpack}"
+output_path="${PACK_OUTPUT:-}"
+checksum_path="${PACK_CHECKSUM_OUTPUT:-}"
 
-mkdir -p "$(dirname "${output_path}")"
-rm -f "${output_path}"
+args=()
+if [[ -n "${output_path}" ]]; then
+  args+=(--output "${output_path}")
+fi
+if [[ -n "${checksum_path}" ]]; then
+  args+=(--checksum-output "${checksum_path}")
+fi
 
-(
-  cd "$source_dir"
-  zip -qr "$output_path" .
-)
-
-echo "Pack created: ${output_path}"
+cd "$repo_root"
+python3 scripts/package.py "${args[@]}"

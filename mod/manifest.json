@@ -2,7 +2,7 @@
   "format_version": 2,
   "header": {
     "name": "Poly C418 Fixes",
-    "description": "A mod to replace the music files with C418s masterpieces",
+    "description": "An audio-free resource-pack packaging scaffold.",
     "uuid": "6c3fe9c5-2dc1-94c5-0bb6-e199ac29cacd",
     "version": [
       1,
