@@ -28,10 +28,11 @@ SHA-256 entry to `SHA256SUMS.txt` beside the artifact. The archive uses sorted
 entries and fixed ZIP metadata so two builds from the same tree have identical
 bytes.
 
-The package is deliberately audio-free. It contains only runtime files from
-`mod/`, rejects audio and nested archive payloads, and must not be described as
-replacing music unless a later approved rights and behavior packet proves that
-claim.
+The package is deliberately audio-free. It contains only regular runtime files
+from `mod/`, rejects all symlinks, audio, and nested archive payloads, and
+requires every distributed file to have a verified-owned 0BSD record in
+`docs/asset-provenance.json`. It must not be described as replacing music unless
+a later approved rights and behavior packet proves that claim.
 
 ## Future operator sequence
 

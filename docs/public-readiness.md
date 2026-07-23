@@ -19,11 +19,14 @@ findings to logs, or run on forked pull requests.
 
 ## Run the all-history audit
 
-Set `AUDIT_REPORT_DIR` to an absolute protected directory outside the checkout,
-then run the exact candidate checkout:
+Set `POLYHYDRA_AUDIT_REPORT_DIR` to an absolute protected **base** directory
+outside the checkout and set the numeric GitHub repository ID separately. The
+script rejects an empty, root, relative, or checkout-local base before it
+appends the repository ID, then runs the exact candidate checkout:
 
 ```bash
-AUDIT_REPORT_DIR=/var/lib/polyhydra-audits/bedrock-c418 \
+POLYHYDRA_AUDIT_REPORT_DIR=/var/lib/polyhydra-audits/bedrock-c418 \
+GITHUB_REPOSITORY_ID=123456789 \
 GITLEAKS_VERSION=8.30.0 \
 bash scripts/audit-public-readiness.sh
 ```
@@ -46,9 +49,9 @@ blocks transfer and visibility until remediated and rescanned.
 
 ## Transfer and public-readiness checklist
 
-- [ ] `mod/pack_icon.png` has a documented ownership/license decision in
-      `THIRD_PARTY_NOTICES.md`, or it has been replaced and reviewed.
-- [ ] Every distributed file matches the license/attribution inventory.
+- [ ] Every distributed file, including `mod/pack_icon.png`, has a
+      verified-owned 0BSD record in `docs/asset-provenance.json`; the automated
+      provenance validator passes with no missing or stale entries.
 - [ ] The manifest and public docs make no unproven audio-replacement claim.
 - [ ] Candidate audit is pass with manual triage complete.
 - [ ] Destination organization, final repository name, branch protections,

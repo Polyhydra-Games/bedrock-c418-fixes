@@ -18,8 +18,9 @@ jobs:
     timeout-minutes: 30
     env:
       # This Actions variable is configured only on the trusted runner/repository.
-      # The script rejects a blank, relative, or checkout-local path.
-      AUDIT_REPORT_DIR: ${{ vars.POLYHYDRA_AUDIT_REPORT_DIR }}/${{ github.repository_id }}
+      # The script validates this base before appending the separate repository ID.
+      POLYHYDRA_AUDIT_REPORT_DIR: ${{ vars.POLYHYDRA_AUDIT_REPORT_DIR }}
+      GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
       GITLEAKS_VERSION: '8.30.0'
     steps:
       - name: Checkout exact dispatch ref

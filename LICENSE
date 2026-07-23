@@ -14,7 +14,9 @@ OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
 
 Scope: this license applies only to original, Polyhydra Games-owned repository
-source, manifests, and documentation. It does not grant rights to the
-unverified `mod/pack_icon.png` or to any Minecraft, Bedrock, Mojang, Microsoft,
-C418, music, game-content, trademark, or other third-party material. See
-THIRD_PARTY_NOTICES.md.
+source, manifests, documentation, and the original Polyhydra Games logo at
+`mod/pack_icon.png`. The product owner has confirmed that logo is user-owned
+and authorized for distribution under 0BSD. This license does not grant rights
+to any Minecraft, Bedrock, Mojang, Microsoft, C418, music, game-content,
+trademark, or other third-party material. See THIRD_PARTY_NOTICES.md and
+docs/asset-provenance.json.

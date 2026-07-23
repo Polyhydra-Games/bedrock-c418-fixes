@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import sys
+import tempfile
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
@@ -52,6 +53,8 @@ def manifest_version(manifest_path: Path) -> str:
 def source_files(source_dir: Path) -> list[Path]:
     files: list[Path] = []
     for path in sorted(source_dir.rglob("*")):
+        if path.is_symlink():
+            fail(f"symlink is not permitted in the pack: {path.relative_to(source_dir)}")
         if not path.is_file():
             continue
         suffix = path.suffix.lower()
@@ -63,6 +66,24 @@ def source_files(source_dir: Path) -> list[Path]:
     if not files:
         fail("pack source contains no files")
     return files
+
+
+def run_regressions() -> None:
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        source_dir = Path(temporary_directory) / "mod"
+        source_dir.mkdir()
+        (source_dir / "manifest.json").write_text("{}", encoding="utf-8")
+        source_files(source_dir)
+
+        target = Path(temporary_directory) / "outside.txt"
+        target.write_text("must not be packaged", encoding="utf-8")
+        (source_dir / "linked.txt").symlink_to(target)
+        try:
+            source_files(source_dir)
+        except SystemExit as error:
+            assert "symlink is not permitted" in str(error)
+        else:
+            raise AssertionError("a symlink-to-file under mod must block packaging")
 
 
 def write_archive(source_dir: Path, output_path: Path) -> str:
@@ -88,7 +109,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, help="output .mcpack path")
     parser.add_argument("--checksum-output", type=Path, help="output SHA256SUMS.txt path")
+    parser.add_argument("--self-test", action="store_true", help="run packaging regressions")
     args = parser.parse_args()
+
+    if args.self_test:
+        run_regressions()
+        print("Package regressions: OK")
+        return
 
     repo_root = Path(__file__).resolve().parents[1]
     source_dir = repo_root / "mod"
