@@ -14,7 +14,7 @@ permissions:
 jobs:
   audit:
     if: inputs.confirm_private_audit == 'audit-private-history'
-    runs-on: [self-hosted, linux, x64]
+    runs-on: ${{ ((github.event_name != 'pull_request') || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == github.repository_owner && github.actor == github.repository_owner)) && fromJSON('["self-hosted", "Linux", "X64", "docker"]') || 'ubuntu-latest' }}
     timeout-minutes: 30
     env:
       # This Actions variable is configured only on the trusted runner/repository.
