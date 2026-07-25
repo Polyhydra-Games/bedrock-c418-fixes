@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "release_policy": {
+    "unresolved_provenance": "block",
+    "required_rights_status": "verified-owned",
+    "required_license": "0BSD"
+  },
+  "distributed_assets": {
+    "manifest.json": {
+      "rights_status": "verified-owned",
+      "license": "0BSD",
+      "rights_basis": "Original Polyhydra Games resource-pack metadata."
+    },
+    "pack_icon.png": {
+      "rights_status": "verified-owned",
+      "license": "0BSD",
+      "rights_basis": "Original Polyhydra Games logo. The product owner confirmed it is user-owned and authorized for distribution under 0BSD."
+    }
+  }
+}

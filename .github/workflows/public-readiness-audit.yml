@@ -1,0 +1,35 @@
+name: Private Public-Readiness Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_private_audit:
+        description: 'Type audit-private-history to confirm protected report storage is configured.'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    if: inputs.confirm_private_audit == 'audit-private-history'
+    runs-on: ${{ ((github.event_name != 'pull_request') || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == github.repository_owner && github.actor == github.repository_owner)) && fromJSON('["self-hosted", "Linux", "X64", "pr-validation", "minecraft-c418"]') || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    env:
+      # This Actions variable is configured only on the trusted runner/repository.
+      # The script validates this base before appending the separate repository ID.
+      POLYHYDRA_AUDIT_REPORT_DIR: ${{ vars.POLYHYDRA_AUDIT_REPORT_DIR }}
+      GITHUB_REPOSITORY_ID: ${{ github.repository_id }}
+      GITLEAKS_VERSION: '8.30.0'
+    steps:
+      - name: Checkout exact dispatch ref
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run protected all-history audit
+        run: bash scripts/audit-public-readiness.sh
+
+# Findings deliberately are not echoed, uploaded, cached, or published as an artifact.

@@ -30,6 +30,7 @@ CoverageResults/
 TestResults/
 node_modules/
 .devstudio/runtime/
+__pycache__/
 
 # Logs / temp
 *.log
