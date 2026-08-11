@@ -15,14 +15,6 @@ Follow the closest `AGENTS.md` first, then the workspace-root `AGENTS.md` when t
 - Preserve existing patterns unless there is a strong reason to change them.
 - If this repo participates in portfolio monitoring, treat the Dev Forge Work Matrix as the operator-facing control surface; keep repo-local current-work notes short and avoid duplicating portfolio state in multiple places.
 
-
-## Hermes Kanban First
-
-- For any new slice, backlog item, generated card pack, or DreadBreadcrumb follow-up, create or identify the Hermes Kanban card first.
-- Repo-local docs (`00_agile/`, `docs/roadmaps/`, `docs/features/`, `CURRENT-WORK.md`) are tracking mirrors: they should link back to the Hermes `t_*` card and may keep local doc-card IDs for grouping, but they are not the execution source of truth.
-- When planning broad work, create a Hermes umbrella/planner card before materializing local generated cards. Promote only the next safe slice(s) to ready; leave broad backlogs in triage/blocked until scoped.
-- Every local card row or markdown backlog entry should include `Hermes Kanban: t_*` once the live card exists, or `Hermes Kanban: pending promotion` if it is only a parked local breadcrumb.
-
 ## Validation
 
 - Prefer creating or updating unit tests when they are the right validation surface.
@@ -54,3 +46,38 @@ Follow the closest `AGENTS.md` first, then the workspace-root `AGENTS.md` when t
 ## Repo Notes
 
 - Add repo-specific commands, constraints, and validation steps below this line.
+
+## Global DevOps GitHub–Kanban Contract
+
+For DevOps, infrastructure, deployment, security, GitOps, and service work:
+
+1. GitHub is authoritative for Issues, PRs, CI, reviews, merges, releases, and delivery state, and is the execution queue.
+2. One GitHub Issue should normally produce one PR directly to `main`.
+3. Before branch work or a PR, fetch `origin/main` and reconcile against the current remote default branch. Do not build branch-on-branch PR stacks unless an explicit integration owner and final target are stated.
+4. Do not merge, deploy, close issues, rotate secrets, or claim production success unless the task explicitly authorizes it and verification evidence exists.
+5. If branches diverge, stop merging the stack. Create one integration branch from current `origin/main`, resolve semantic conflicts deliberately, run tests, and open one replacement PR to `main`.
+6. For security or infrastructure work, provide exact build, test, and diff evidence and require fresh independent review before merge. Never put secrets in code, logs, PRs, or comments.
+7. A task is not complete because a local test passes or a Kanban card says done. Completion requires the requested GitHub state and, when applicable, verified live behavior.
+8. When creating a PR, state its target branch, linked issue, validation output, and whether it supersedes prior PRs. Do not leave divergent worker PRs ambiguous.
+
+<!-- dev-forge:low-interruption:start version=1 -->
+## Low-Interruption Execution
+
+- Treat explicit outcome requests such as "fix," "build," "complete," and
+  "finish" as continuing authorization for bounded work toward that outcome.
+- Continue through diagnosis, implementation, tests, commits, pushes, review
+  feedback, and CI repair without renewed confirmation.
+- New defects discovered within the same task or pull request remain in scope
+  when the repair is reversible, clearly supported, and consistent with the
+  existing architecture.
+- Progress updates are informational and do not pause execution.
+- Do not request confirmation when the only realistic alternatives are the
+  clearly supported action and inaction.
+- Use a blocking checkpoint only at a genuine impasse. Present two or three
+  materially different choices as **A**, **B**, and optionally **C**; recommend
+  one and ask for a one-letter reply.
+- Do not use "Done — continue" as a generic permission gate.
+- Preserve explicit approval boundaries for merge, deploy, destructive work,
+  secret or access changes, material cost, external communication, and credible
+  downtime or data-loss risk.
+<!-- dev-forge:low-interruption:end -->
