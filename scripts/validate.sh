@@ -51,7 +51,6 @@ trap 'rm -rf "${tmp_dir}"' EXIT
 PACK_OUTPUT="${tmp_dir}/first.mcpack" PACK_CHECKSUM_OUTPUT="${tmp_dir}/first.SHA256SUMS.txt" bash scripts/package.sh >/dev/null
 PACK_OUTPUT="${tmp_dir}/second.mcpack" PACK_CHECKSUM_OUTPUT="${tmp_dir}/second.SHA256SUMS.txt" bash scripts/package.sh >/dev/null
 cmp "${tmp_dir}/first.mcpack" "${tmp_dir}/second.mcpack"
-zip -T "${tmp_dir}/first.mcpack" >/dev/null
 python3 - "${tmp_dir}/first.mcpack" <<'PY'
 from pathlib import Path
 from zipfile import ZipFile
@@ -59,6 +58,11 @@ from zipfile import ZipFile
 archive_path = Path(__import__("sys").argv[1])
 audio_suffixes = {".aac", ".aif", ".aiff", ".flac", ".m4a", ".mid", ".midi", ".mp2", ".mp3", ".oga", ".ogg", ".opus", ".wav", ".weba", ".wma"}
 with ZipFile(archive_path) as archive:
+    # Replaces `zip -T`, which was the only thing in this repository that
+    # needed the zip binary. The self-hosted runner does not have it, so CI
+    # had been failing here with exit 127 since at least 2026-07-04.
+    # testzip() verifies every entry's CRC, which is what `zip -T` did.
+    assert archive.testzip() is None, "archive contains a corrupt entry"
     names = archive.namelist()
     assert names == sorted(names), "archive entries are not deterministic"
     assert "manifest.json" in names, "manifest is missing"
