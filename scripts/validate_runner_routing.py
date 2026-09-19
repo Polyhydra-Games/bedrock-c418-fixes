@@ -10,8 +10,10 @@ TRUSTED_LABELS = '["self-hosted", "Linux", "X64", "pr-validation", "minecraft-c4
 TRUSTED_RUNNER_EXPRESSION = (
     "${{ ((github.event_name != 'pull_request') || "
     "(github.event.pull_request.head.repo.full_name == github.repository && "
-    "github.event.pull_request.user.login == github.repository_owner && "
-    "github.actor == github.repository_owner)) && "
+    "(github.event.pull_request.user.login == github.repository_owner || "
+    "github.event.pull_request.user.login == 'polyhydra-release-bot[bot]') && "
+    "(github.actor == github.repository_owner || "
+    "github.actor == 'polyhydra-release-bot[bot]'))) && "
     f"fromJSON('{TRUSTED_LABELS}') || 'ubuntu-latest' }}"
 )
 
@@ -26,8 +28,8 @@ def selected_runner(
 ) -> str:
     trusted_pull_request = (
         head_repository == repository
-        and pull_request_user == repository_owner
-        and actor == repository_owner
+        and (pull_request_user == repository_owner or pull_request_user == "polyhydra-release-bot[bot]")
+        and (actor == repository_owner or actor == "polyhydra-release-bot[bot]")
     )
     return TRUSTED_LABELS if event_name != "pull_request" or trusted_pull_request else "ubuntu-latest"
 
@@ -54,6 +56,10 @@ def assert_routing_contract() -> None:
     assert selected_runner(**(trusted | {"pull_request_user": "contributor"})) == "ubuntu-latest"
     assert selected_runner(**(trusted | {"actor": "contributor"})) == "ubuntu-latest"
     assert selected_runner(**(trusted | {"event_name": "push"})) == TRUSTED_LABELS
+    # Bot identity is also trusted
+    assert selected_runner(**(trusted | {"pull_request_user": "polyhydra-release-bot[bot]", "actor": "polyhydra-release-bot[bot]"})) == TRUSTED_LABELS
+    assert selected_runner(**(trusted | {"pull_request_user": "polyhydra-release-bot[bot]", "actor": "contributor"})) == "ubuntu-latest"
+    assert selected_runner(**(trusted | {"pull_request_user": "contributor", "actor": "polyhydra-release-bot[bot]"})) == "ubuntu-latest"
 
 
 if __name__ == "__main__":
