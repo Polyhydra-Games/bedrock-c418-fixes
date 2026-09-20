@@ -11,9 +11,11 @@ TRUSTED_RUNNER_EXPRESSION = (
     "${{ ((github.event_name != 'pull_request') || "
     "(github.event.pull_request.head.repo.full_name == github.repository && "
     "(github.event.pull_request.user.login == github.repository_owner || "
-    "github.event.pull_request.user.login == 'polyhydra-release-bot[bot]') && "
+    "github.event.pull_request.user.login == 'polyhydra-release-bot[bot]' || "
+    "github.event.pull_request.user.login == 'lancer1977') && "
     "(github.actor == github.repository_owner || "
-    "github.actor == 'polyhydra-release-bot[bot]'))) && "
+    "github.actor == 'polyhydra-release-bot[bot]' || "
+    "github.actor == 'lancer1977'))) && "
     f"fromJSON('{TRUSTED_LABELS}') || 'ubuntu-latest' }}"
 )
 
@@ -26,10 +28,11 @@ def selected_runner(
     repository_owner: str,
     actor: str,
 ) -> str:
+    trusted_login = {repository_owner, "polyhydra-release-bot[bot]", "lancer1977"}
     trusted_pull_request = (
         head_repository == repository
-        and (pull_request_user == repository_owner or pull_request_user == "polyhydra-release-bot[bot]")
-        and (actor == repository_owner or actor == "polyhydra-release-bot[bot]")
+        and pull_request_user in trusted_login
+        and actor in trusted_login
     )
     return TRUSTED_LABELS if event_name != "pull_request" or trusted_pull_request else "ubuntu-latest"
 
@@ -60,6 +63,12 @@ def assert_routing_contract() -> None:
     assert selected_runner(**(trusted | {"pull_request_user": "polyhydra-release-bot[bot]", "actor": "polyhydra-release-bot[bot]"})) == TRUSTED_LABELS
     assert selected_runner(**(trusted | {"pull_request_user": "polyhydra-release-bot[bot]", "actor": "contributor"})) == "ubuntu-latest"
     assert selected_runner(**(trusted | {"pull_request_user": "contributor", "actor": "polyhydra-release-bot[bot]"})) == "ubuntu-latest"
+    # The human org owner (github.repository_owner resolves to the org login
+    # for an org-owned repo, which no individual actor can ever match, so
+    # lancer1977 is trusted explicitly by login)
+    assert selected_runner(**(trusted | {"pull_request_user": "lancer1977", "actor": "lancer1977"})) == TRUSTED_LABELS
+    assert selected_runner(**(trusted | {"pull_request_user": "lancer1977", "actor": "contributor"})) == "ubuntu-latest"
+    assert selected_runner(**(trusted | {"pull_request_user": "contributor", "actor": "lancer1977"})) == "ubuntu-latest"
 
 
 if __name__ == "__main__":
