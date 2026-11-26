@@ -1,5 +1,14 @@
 name: Catalog Manifest
 
+# Self-contained catalog manifest validation. No call to, or checkout of, a
+# private repository, and no token: the stdlib-only validator is embedded below
+# as "Stage validator part N/M" steps (GitHub caps a step's `run` at 21,000
+# chars). Vendored from lancer1977/workstation-kit
+# .github/workflows/catalog-manifest-validate-reusable.yml @ b841a3249665
+# (embedded copy of tools/catalog_project_sync.py; refresh from that workflow,
+# do not edit the staged copy by hand). Replaces the retired dev-forge reusable
+# workflow (lancer1977/review-loop#95).
+
 on:
   pull_request:
     paths:
@@ -19,4 +28,1728 @@ permissions:
 
 jobs:
   validate:
-    uses: lancer1977/dev-forge/.github/workflows/catalog-manifest-validate-reusable.yml@main
+    name: Validate catalog manifest
+    runs-on: [self-hosted, Linux, X64, pool-ci]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout caller repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: caller-repo
+
+      - name: Stage validator part 1/4
+        run: |
+          set -euo pipefail
+          # Part 1/4 of the embedded copy of tools/catalog_project_sync.py
+          # (stdlib only). Do not edit by hand: python3 tools/catalog_validator_inline.py --write
+          cat > "${RUNNER_TEMP:-$PWD}/catalog_project_sync_embedded.py" <<'CATALOG_VALIDATOR_PY_EOF_1'
+          #!/usr/bin/env python3
+          """Track workspace adoption of Polyhydra project catalog manifests."""
+
+          from __future__ import annotations
+
+          import argparse
+          import errno
+          import hashlib
+          import json
+          import os
+          import re
+          import stat
+          import subprocess
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+          from typing import Any
+          from urllib.parse import urlparse
+
+
+          REQUIRED_FIELDS = {
+              "schemaVersion": int,
+              "slug": str,
+              "name": str,
+              "summary": str,
+          }
+
+          ALLOWED_FIELDS = {
+              "$schema",
+              "schemaVersion",
+              "slug",
+              "name",
+              "summary",
+              "status",
+              "docsUrl",
+              "demoUrl",
+              "repoLabel",
+              "tags",
+              "lastUpdated",
+          }
+
+          MAX_LENGTHS = {
+              "slug": 128,
+              "name": 256,
+              "summary": 4096,
+              "status": 128,
+              "docsUrl": 2048,
+              "demoUrl": 2048,
+              "repoLabel": 512,
+          }
+
+          CATALOG_SOURCE_FILE_NAMES = {
+              "Cargo.toml",
+              "Dockerfile",
+              "compose.yml",
+              "docker-compose.yml",
+              "go.mod",
+              "package.json",
+              "polyhydra.project.json",
+              "pyproject.toml",
+          }
+
+          CATALOG_SOURCE_SUFFIXES = {
+              ".csproj",
+              ".fsproj",
+              ".sln",
+          }
+
+          CATALOG_WORKFLOW_RELATIVE_PATH = Path(".github/workflows/catalog-manifest.yml")
+
+          CATALOG_WORKFLOW_BODY = """name: Catalog Manifest
+
+          on:
+            pull_request:
+              paths:
+                - polyhydra.project.json
+            push:
+              branches: [main]
+              paths:
+                - polyhydra.project.json
+            workflow_dispatch:
+
+          permissions:
+            contents: read
+
+          jobs:
+            validate:
+              uses: lancer1977/workstation-kit/.github/workflows/catalog-manifest-validate-reusable.yml@main
+          """
+
+          CATALOG_WORKFLOW_REUSABLE_MARKER = "catalog-manifest-validate-reusable.yml"
+
+
+          def kebab(value: str) -> str:
+              slug = re.sub(r"[^a-zA-Z0-9]+", "-", value.strip()).strip("-").lower()
+              return slug or "project"
+
+
+          def normalize_repo_label(value: str) -> str:
+              label = value.strip()
+              if ":" in label and "/" in label:
+                  label = label.split(":", 1)[1]
+              return label
+
+
+          class InputJSONError(ValueError):
+              """An input JSON file is unreadable, malformed, too deep, or not a JSON object."""
+
+
+          def load_json(path: Path) -> dict[str, Any]:
+              """Load an input JSON file that must hold a top-level object."""
+              try:
+                  data = json.loads(path.read_text(encoding="utf-8"))
+              except RecursionError as exc:
+                  raise InputJSONError(f"{path}: JSON is nested too deeply to parse") from exc
+              except OSError as exc:
+                  raise InputJSONError(f"{path}: cannot read input JSON: {exc.strerror or exc}") from exc
+              except UnicodeDecodeError as exc:
+                  raise InputJSONError(f"{path}: input JSON is not valid UTF-8") from exc
+              except json.JSONDecodeError as exc:
+                  raise InputJSONError(f"{path}: malformed JSON at line {exc.lineno} column {exc.colno}: {exc.msg}") from exc
+              if not isinstance(data, dict):
+                  raise InputJSONError(f"{path}: expected a JSON object, got {json_type_name(data)}")
+              return data
+
+
+          class WorkspaceEscapeError(ValueError):
+              """A write destination resolves outside the selected workspace root."""
+
+
+          def resolve_within_workspace(root: Path, candidate: Path | str) -> Path:
+              """Resolve candidate against root and reject anything that lands outside it.
+
+              Relative candidates are joined to the resolved root; absolute candidates are
+              used as-is. Every existing symlink is followed, including intermediate ones.
+              """
+              for value in (root, candidate):
+                  if "\x00" in str(value):
+                      raise WorkspaceEscapeError(f"refusing to write: path {str(value)!r} contains a NUL byte")
+              root_resolved = Path(root).resolve(strict=False)
+              candidate_path = Path(candidate)
+              joined = candidate_path if candidate_path.is_absolute() else root_resolved / candidate_path
+              resolved = joined.resolve(strict=False)
+              if resolved == root_resolved or resolved.is_relative_to(root_resolved):
+                  return resolved
+              raise WorkspaceEscapeError(
+                  f"refusing to write: path {str(candidate)!r} resolves outside the workspace root {str(root_resolved)!r}"
+              )
+
+
+          def ensure_directories_within(root: Path, directory: Path) -> None:
+              """Create directory and any missing parents without ever leaving root.
+
+              Each component is created and opened relative to the already-verified
+              parent's file descriptor with O_NOFOLLOW, so a component swapped for a
+              symlink between resolution and creation is refused instead of followed,
+              and no directory is ever created outside root.
+              """
+              root_resolved = Path(root).resolve(strict=False)
+              try:
+                  relative = Path(directory).relative_to(root_resolved)
+              except ValueError as exc:
+                  raise WorkspaceEscapeError(
+                      f"refusing to write: directory {str(directory)!r} is outside the workspace root {str(root_resolved)!r}"
+                  ) from exc
+              flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+              try:
+                  root_resolved.mkdir(parents=True, exist_ok=True)
+                  fd = os.open(root_resolved, flags)
+              except OSError as exc:
+                  raise WorkspaceEscapeError(
+                      f"refusing to write: cannot open workspace root {str(root_resolved)!r}: {exc.strerror or exc}"
+                  ) from exc
+              try:
+                  current = root_resolved
+                  for part in relative.parts:
+                      if part in ("", ".", ".."):
+                          raise WorkspaceEscapeError(f"refusing to write: unsafe directory component {part!r}")
+                      current = current / part
+                      try:
+                          os.mkdir(part, 0o755, dir_fd=fd)
+                      except FileExistsError:
+                          pass
+                      except OSError as exc:
+                          raise WorkspaceEscapeError(
+                              f"refusing to write: cannot create directory {str(current)!r}: {exc.strerror or exc}"
+                          ) from exc
+                      try:
+                          next_fd = os.open(part, flags, dir_fd=fd)
+                      except OSError as exc:
+                          if exc.errno in (errno.ELOOP, errno.ENOTDIR, errno.EMLINK):
+                              raise WorkspaceEscapeError(
+                                  f"refusing to write: {str(current)!r} is not a real directory inside the workspace root"
+                              ) from exc
+                          raise WorkspaceEscapeError(f"refusing to write: cannot open directory {str(current)!r}: {exc.strerror}") from exc
+                      os.close(fd)
+                      fd = next_fd
+              finally:
+                  os.close(fd)
+
+
+          def write_within_workspace(root: Path, destination: Path, body: str) -> None:
+              """Write body to destination, re-checking containment at write time.
+
+              The pre-checked destination is re-resolved, its directory is opened and
+              confirmed to still be the in-root directory, and the file is opened
+              relative to that directory without following a final-component symlink.
+              A destination with more than one hard link is refused before any byte is
+              written or truncated.
+              """
+              target = resolve_within_workspace(root, destination)
+              ensure_directories_within(root, target.parent)
+              target = resolve_within_workspace(root, target)
+              cloexec = getattr(os, "O_CLOEXEC", 0)
+              nofollow = getattr(os, "O_NOFOLLOW", 0)
+
+              try:
+                  dir_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | nofollow | cloexec)
+              except OSError as exc:
+                  raise WorkspaceEscapeError(f"refusing to write: cannot open directory {str(target.parent)!r}: {exc.strerror}") from exc
+              try:
+                  parent_now = resolve_within_workspace(root, target.parent)
+                  try:
+                      parent_stat = os.stat(parent_now)
+                  except OSError as exc:
+                      raise WorkspaceEscapeError(f"refusing to write: directory {str(parent_now)!r} changed during write") from exc
+                  dir_stat = os.fstat(dir_fd)
+                  if (dir_stat.st_dev, dir_stat.st_ino) != (parent_stat.st_dev, parent_stat.st_ino):
+                      raise WorkspaceEscapeError(f"refusing to write: directory {str(target.parent)!r} changed during write")
+
+                  try:
+                      existing = os.stat(target.name, dir_fd=dir_fd, follow_symlinks=False)
+                  except FileNotFoundError:
+                      existing = None
+                  if existing is not None:
+                      if stat.S_ISLNK(existing.st_mode):
+                          raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} is a symlink")
+                      if not stat.S_ISREG(existing.st_mode):
+                          raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} is not a regular file")
+
+                  # No O_TRUNC: a refused hard link must not be truncated before fstat.
+                  try:
+                      fd = os.open(target.name, os.O_WRONLY | os.O_CREAT | nofollow | cloexec, 0o644, dir_fd=dir_fd)
+                  except OSError as exc:
+                      if exc.errno in (errno.ELOOP, errno.EMLINK):
+                          raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} is a symlink") from exc
+                      raise WorkspaceEscapeError(f"refusing to write: cannot open {str(target)!r}: {exc.strerror}") from exc
+              finally:
+                  os.close(dir_fd)
+
+              try:
+                  opened = os.fstat(fd)
+                  if not stat.S_ISREG(opened.st_mode):
+                      raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} is not a regular file")
+                  if opened.st_nlink > 1:
+                      raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} has {opened.st_nlink} hard links")
+                  os.ftruncate(fd, 0)
+                  data = body.encode("utf-8")
+                  view = memoryview(data)
+                  while view:
+                      written = os.write(fd, view)
+                      view = view[written:]
+              finally:
+                  os.close(fd)
+
+
+          def precheck_write_destination(root: Path, destination: Path) -> Path:
+              """Refuse an unsafe destination before any write in the run happens.
+
+              Containment is re-checked, every existing ancestor inside root must be a
+              directory, and an existing destination must be a single-link regular file.
+              write_within_workspace repeats these checks at open time.
+              """
+              target = resolve_within_workspace(root, destination)
+              root_resolved = Path(root).resolve(strict=False)
+              for ancestor in target.parents:
+                  if not ancestor.is_relative_to(root_resolved):
+                      break
+                  try:
+                      ancestor_stat = os.stat(ancestor)
+                  except FileNotFoundError:
+                      continue
+                  if not stat.S_ISDIR(ancestor_stat.st_mode):
+                      raise WorkspaceEscapeError(f"refusing to write: {str(ancestor)!r} is not a directory")
+              try:
+                  existing = os.lstat(target)
+              except FileNotFoundError:
+                  return target
+              if stat.S_ISLNK(existing.st_mode):
+                  raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} is a symlink")
+              if not stat.S_ISREG(existing.st_mode):
+                  raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} is not a regular file")
+              if existing.st_nlink > 1:
+                  raise WorkspaceEscapeError(f"refusing to write: {str(target)!r} has {existing.st_nlink} hard links")
+              return target
+
+
+          def write_all_within_workspace(root: Path, writes: list[tuple[Path, str]]) -> None:
+              """Pre-check every destination, then write them in order.
+
+              A pre-check refusal aborts with nothing written. A refusal that only shows
+              up at write time (a destination swapped after the pre-check) names the
+              destinations already written, so a partial run is never silent.
+              """
+              for destination, _body in writes:
+                  precheck_write_destination(root, destination)
+              completed: list[str] = []
+              for destination, body in writes:
+                  try:
+                      write_within_workspace(root, destination, body)
+                  except WorkspaceEscapeError as exc:
+                      if not completed:
+                          raise
+                      raise WorkspaceEscapeError(
+                          f"{exc}; {len(completed)} earlier write(s) completed before this refusal: {', '.join(completed)}"
+                      ) from exc
+                  completed.append(str(destination))
+
+
+          def require_explicit_workspace_root(args: argparse.Namespace, source_label: str) -> None:
+              """Refuse --write unless the operator named the workspace root on the command line.
+
+              Without --workspace-root the root would come from the untrusted matrix or
+              candidate report itself, so containment would be checked against a root the
+              input chose. Read-only runs keep the existing fallback.
+              """
+              if getattr(args, "write", False) and not args.workspace_root:
+                  raise WorkspaceEscapeError(
+                      f"refusing to write: --write requires an explicit --workspace-root; the root named in {source_label} is not trusted"
+                  )
+
+
+          def json_type_name(value: Any) -> str:
+              return "null" if value is None else type(value).__name__
+
+
+          def validate_manifest(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
+              try:
+                  manifest = json.loads(path.read_text(encoding="utf-8"))
+              except (OSError, ValueError) as exc:
+                  return None, [str(exc)]
+              except RecursionError:
+                  return None, ["manifest JSON is nested too deeply to parse"]
+
+              if not isinstance(manifest, dict):
+                  return None, [f"manifest must be a JSON object, got {json_type_name(manifest)}"]
+
+              return validate_manifest_payload(manifest)
+
+
+          def validate_manifest_payload(manifest: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+              issues: list[str] = []
+              unknown_fields = sorted(set(manifest) - ALLOWED_FIELDS)
+              if unknown_fields:
+                  issues.append(f"unknown fields: {', '.join(unknown_fields)}")
+
+              for field, expected_type in REQUIRED_FIELDS.items():
+                  value = manifest.get(field)
+                  if not isinstance(value, expected_type):
+                      issues.append(f"{field} must be {expected_type.__name__}")
+                  elif expected_type is str and not value.strip():
+                      issues.append(f"{field} cannot be empty")
+
+              if manifest.get("schemaVersion") != 1:
+                  issues.append("schemaVersion must be 1")
+
+              for field, max_length in MAX_LENGTHS.items():
+                  value = manifest.get(field)
+                  if isinstance(value, str) and len(value) > max_length:
+                      issues.append(f"{field} must be {max_length} characters or fewer")
+
+              summary = manifest.get("summary")
+              if isinstance(summary, str) and has_local_path(summary):
+                  issues.append("summary cannot contain a local /home/... or ~/... path")
+
+              slug = manifest.get("slug")
+              if isinstance(slug, str) and slug.strip() and slug != kebab(slug):
+                  issues.append("slug must be lowercase kebab-case")
+
+              for field in ("docsUrl", "demoUrl"):
+                  value = manifest.get(field)
+                  if value is None:
+                      continue
+                  if not isinstance(value, str):
+                      issues.append(f"{field} must be str")
+                      continue
+                  parsed = urlparse(value)
+                  if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                      issues.append(f"{field} must be an absolute http(s) URL")
+                  if has_local_path(value):
+                      issues.append(f"{field} cannot contain a local /home/... path")
+
+              tags = manifest.get("tags")
+              if tags is not None:
+                  if not isinstance(tags, list):
+                      issues.append("tags must be a list when present")
+                  else:
+                      seen_tags: set[str] = set()
+                      for index, tag in enumerate(tags):
+                          if not isinstance(tag, str):
+                              issues.append(f"tags[{index}] must be str")
+                              continue
+                          normalized = tag.strip().lower()
+                          if not normalized:
+                              issues.append(f"tags[{index}] cannot be empty")
+                          if normalized in seen_tags:
+                              issues.append(f"duplicate tag: {tag}")
+                          seen_tags.add(normalized)
+
+              last_updated = manifest.get("lastUpdated")
+              if last_updated is not None:
+                  if not isinstance(last_updated, str):
+                      issues.append("lastUpdated must be str")
+                  else:
+                      try:
+                          datetime.strptime(last_updated, "%Y-%m-%d")
+                      except ValueError:
+                          issues.append("lastUpdated must use YYYY-MM-DD")
+
+              return manifest, issues
+
+
+          def manifest_hash(path: Path) -> str:
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+          def catalog_source_hash(repo_path: Path) -> str | None:
+              source_files = catalog_source_files(repo_path)
+              if not source_files:
+                  return None
+
+              digest = hashlib.sha256()
+              for source_file in source_files:
+                  relative = source_file.relative_to(repo_path).as_posix()
+                  digest.update(relative.encode("utf-8"))
+                  digest.update(b"\0")
+                  digest.update(source_file.read_bytes())
+                  digest.update(b"\0")
+              return digest.hexdigest()
+
+
+          def catalog_source_files(repo_path: Path) -> list[Path]:
+              if not repo_path.exists():
+                  return []
+
+              files: list[Path] = []
+              for child in repo_path.iterdir():
+                  if not child.is_file():
+                      continue
+                  if is_catalog_source_file(child):
+                      files.append(child)
+
+              docs_path = repo_path / "docs"
+              if docs_path.exists():
+                  files.extend(path for path in docs_path.rglob("*") if path.is_file())
+
+              return sorted(files, key=lambda path: path.relative_to(repo_path).as_posix())
+
+
+          def is_catalog_source_file(path: Path) -> bool:
+              name = path.name
+              return (
+                  name.startswith("README") or
+                  name in CATALOG_SOURCE_FILE_NAMES or
+                  path.suffix in CATALOG_SOURCE_SUFFIXES
+              )
+
+
+          def catalog_workflow_status(repo_path: Path) -> tuple[str | None, str | None]:
+              workflow_path = repo_path / CATALOG_WORKFLOW_RELATIVE_PATH
+              if not repo_path.exists():
+                  return None, None
+              if not workflow_path.exists():
+                  return "missing", None
+
+              text = workflow_path.read_text(encoding="utf-8", errors="replace")
+              status = "wired" if CATALOG_WORKFLOW_REUSABLE_MARKER in text else "custom"
+              return status, str(workflow_path)
+
+
+          CATALOG_VALIDATOR_PY_EOF_1
+
+      - name: Stage validator part 2/4
+        run: |
+          set -euo pipefail
+          # Part 2/4 of the embedded copy of tools/catalog_project_sync.py
+          # (stdlib only). Do not edit by hand: python3 tools/catalog_validator_inline.py --write
+          cat >> "${RUNNER_TEMP:-$PWD}/catalog_project_sync_embedded.py" <<'CATALOG_VALIDATOR_PY_EOF_2'
+          def git_value(repo_path: Path, *args: str) -> str | None:
+              try:
+                  result = subprocess.run(
+                      ["git", "-C", str(repo_path), *args],
+                      check=True,
+                      capture_output=True,
+                      text=True,
+                  )
+              except (OSError, subprocess.CalledProcessError):
+                  return None
+
+              value = result.stdout.strip()
+              return value or None
+
+
+          def git_dirty(repo_path: Path) -> bool | None:
+              try:
+                  result = subprocess.run(
+                      ["git", "-C", str(repo_path), "status", "--short"],
+                      check=True,
+                      capture_output=True,
+                      text=True,
+                  )
+              except (OSError, subprocess.CalledProcessError):
+                  return None
+
+              return bool(result.stdout.strip())
+
+
+          def repo_entries(repo_matrix: dict[str, Any]) -> list[dict[str, Any]]:
+              repositories = repo_matrix.get("repositories", [])
+              if not isinstance(repositories, list):
+                  raise ValueError("repo matrix repositories must be a list")
+              return [repo for repo in repositories if isinstance(repo, dict)]
+
+
+          def repo_path(root: Path, repo: dict[str, Any]) -> Path:
+              return root / str(repo.get("path", ""))
+
+
+          def is_scratch_repo_path(path: str) -> bool:
+              return any(
+                  part.startswith(".tmp-") or
+                  part.startswith(".codex-") or
+                  part in {".codex-tmp", ".codex-worktrees"}
+                  for part in Path(path).parts
+              )
+
+
+          def find_repo(repositories: list[dict[str, Any]], selector: str, root: Path) -> dict[str, Any]:
+              wanted = selector.strip().lower()
+              matches = [
+                  repo
+                  for repo in repositories
+                  if wanted
+                  in {
+                      str(repo.get("name", "")).lower(),
+                      str(repo.get("path", "")).lower(),
+                      str(repo.get("github_slug", "")).lower(),
+                  }
+              ]
+              if not matches:
+                  raise ValueError(f"repo not found in matrix: {selector}")
+
+              exact_path_matches = [repo for repo in matches if str(repo.get("path", "")).lower() == wanted]
+              if len(exact_path_matches) == 1:
+                  return exact_path_matches[0]
+
+              existing_matches = [repo for repo in matches if repo_path(root, repo).exists()]
+              if len(existing_matches) == 1:
+                  return existing_matches[0]
+
+              if len(matches) > 1:
+                  names = ", ".join(str(repo.get("path", "")) for repo in matches)
+                  raise ValueError(f"repo selector matched multiple repos: {names}")
+              return matches[0]
+
+
+          def read_summary(readme_path: Path, fallback: str) -> str:
+              if not readme_path.exists():
+                  return fallback
+
+              paragraph: list[str] = []
+              for raw_line in readme_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                  line = raw_line.strip()
+                  if not line:
+                      if paragraph:
+                          break
+                      continue
+                  if line.startswith("#") or line.startswith("[!") or line.startswith("- "):
+                      if paragraph:
+                          break
+                      continue
+                  if should_skip_summary_line(line):
+                      continue
+                  line = re.sub(r"`([^`]+)`", r"\1", line)
+                  line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+                  line = re.sub(r"\*([^*]+)\*", r"\1", line)
+                  paragraph.append(line)
+
+              if not paragraph:
+                  return fallback
+
+              summary = " ".join(paragraph)
+              if len(summary) <= 500:
+                  return summary
+              return summary[:500].rsplit(" ", 1)[0]
+
+
+          def should_skip_summary_line(line: str) -> bool:
+              lowered = line.lower()
+              return (
+                  "vault project" in lowered or
+                  has_local_path(line) or
+                  lowered.startswith("see [") or
+                  lowered.startswith("see ")
+              )
+
+
+          def has_local_path(value: str) -> bool:
+              lowered = value.lower()
+              return "/home/" in lowered or "~/" in lowered
+
+
+          def suggested_tags(repo: dict[str, Any]) -> list[str]:
+              tags: list[str] = []
+
+              def add(value: str | None) -> None:
+                  if not value:
+                      return
+                  tag = kebab(value)
+                  if tag and tag not in tags:
+                      tags.append(tag)
+
+              bucket = str(repo.get("bucket", ""))
+              for part in re.split(r"\s+and\s+|[,/]", bucket):
+                  add(part)
+
+              language = str(repo.get("primary_language", ""))
+              if language == "C#":
+                  language = "csharp"
+              add(language)
+              if repo.get("has_docs"):
+                  add("docs")
+              if repo.get("has_tests"):
+                  add("tests")
+              if repo.get("has_docker"):
+                  add("docker")
+
+              return tags[:8]
+
+
+          def suggest_manifest(repo: dict[str, Any], root: Path) -> dict[str, Any]:
+              name = str(repo.get("name") or repo.get("path") or "project")
+              path = str(repo.get("path") or name)
+              project_path = repo_path(root, repo)
+              summary = read_summary(project_path / "README.md", f"Catalog manifest for {name}.")
+
+              return {
+                  "schemaVersion": 1,
+                  "slug": kebab(path),
+                  "name": name,
+                  "summary": summary,
+                  "status": "active",
+                  "repoLabel": normalize_repo_label(str(repo.get("github_slug") or name)),
+                  "tags": suggested_tags(repo),
+                  "lastUpdated": datetime.now(timezone.utc).date().isoformat(),
+              }
+
+
+          def adoption_score(repo: dict[str, Any]) -> tuple[int, list[str]]:
+              score = 0
+              reasons: list[str] = []
+
+              bucket = str(repo.get("bucket", ""))
+              if bucket in {"Apps and UI", "API services", "Game support", "Media and streaming", "Agent control plane"}:
+                  score += 40
+                  reasons.append(f"catalog-relevant bucket: {bucket}")
+              elif bucket == "Experiments and archive":
+                  score -= 20
+                  reasons.append("archive bucket")
+              else:
+                  score += 10
+                  reasons.append(f"supporting bucket: {bucket}")
+
+              for field, points, label in (
+                  ("has_readme", 12, "README"),
+                  ("has_docs", 8, "docs"),
+                  ("has_tests", 8, "tests"),
+                  ("has_ci", 6, "CI"),
+                  ("has_docker", 4, "docker"),
+              ):
+                  if repo.get(field):
+                      score += points
+                      reasons.append(f"has {label}")
+
+              language = str(repo.get("primary_language", "unknown"))
+              if language and language != "unknown":
+                  score += 5
+                  reasons.append(f"language: {language}")
+
+              last_commit = parse_matrix_datetime(str(repo.get("last_commit", "")))
+              if last_commit is not None:
+                  year = last_commit.year
+                  if year >= 2026:
+                      score += 12
+                      reasons.append("recent commit")
+                  elif year >= 2024:
+                      score += 4
+                      reasons.append("maintained since 2024")
+
+              if repo.get("dirty"):
+                  score -= 5
+                  reasons.append("dirty working tree")
+
+              return score, reasons
+
+
+          def parse_matrix_datetime(value: str) -> datetime | None:
+              if not value:
+                  return None
+              try:
+                  return datetime.fromisoformat(value)
+              except ValueError:
+                  return None
+
+
+          def load_synced_evidence(sync_state_path: Path | None) -> dict[str, dict[str, Any]]:
+              if not sync_state_path or not sync_state_path.exists():
+                  return {}
+
+              try:
+                  state = load_json(sync_state_path)
+              except (OSError, json.JSONDecodeError, InputJSONError):
+                  return {}
+
+              synced: dict[str, dict[str, Any]] = {}
+              for repo in state.get("repositories", []):
+                  if not isinstance(repo, dict):
+                      continue
+                  catalog_slug = repo.get("catalogSlug")
+                  if isinstance(catalog_slug, str):
+                      synced[catalog_slug] = {
+                          "manifestHash": repo.get("lastSyncedManifestHash") or repo.get("manifestHash"),
+                          "sourceHash": repo.get("lastSyncedSourceHash") or repo.get("catalogSourceHash"),
+                          "commit": repo.get("lastSyncedCommit") or repo.get("currentCommit"),
+                          "syncedAt": repo.get("lastSyncedAt"),
+                      }
+              return synced
+
+
+          def build_state(repo_matrix_path: Path, workspace_root: Path | None) -> dict[str, Any]:
+              repo_matrix = load_json(repo_matrix_path)
+              root = workspace_root or Path(str(repo_matrix.get("scan_root", "~/code"))).expanduser()
+              return build_state_from_matrix(repo_matrix_path, root, None)
+
+
+          def build_state_from_matrix(
+              repo_matrix_path: Path,
+              root: Path,
+              last_synced_state_path: Path | None,
+          ) -> dict[str, Any]:
+              repo_matrix = load_json(repo_matrix_path)
+              synced_evidence = load_synced_evidence(last_synced_state_path)
+              repositories: list[dict[str, Any]] = []
+
+              for repo in repo_entries(repo_matrix):
+                  project_path = repo_path(root, repo)
+                  manifest_path = project_path / "polyhydra.project.json"
+                  manifest: dict[str, Any] | None = None
+                  issues: list[str] = []
+                  status = "missing-manifest"
+                  digest: str | None = None
+                  source_digest = catalog_source_hash(project_path) if project_path.exists() else None
+                  current_commit = git_value(project_path, "rev-parse", "HEAD") if project_path.exists() else None
+                  dirty = git_dirty(project_path) if project_path.exists() else None
+                  workflow_status, workflow_path = catalog_workflow_status(project_path)
+                  sync_evidence: dict[str, Any] = {}
+
+                  if manifest_path.exists():
+                      manifest, issues = validate_manifest(manifest_path)
+                      if issues:
+                          status = "invalid-manifest"
+                      else:
+                          digest = manifest_hash(manifest_path)
+                          sync_evidence = synced_evidence.get(str(manifest.get("slug")), {})
+                          last_manifest_digest = sync_evidence.get("manifestHash")
+                          last_source_digest = sync_evidence.get("sourceHash")
+                          if last_manifest_digest != digest:
+                              status = "manifest-ready"
+                          elif last_source_digest and source_digest and last_source_digest != source_digest:
+                              status = "stale-manifest"
+                              issues.append("catalog source files changed since last import")
+                          else:
+                              status = "synced"
+
+                  repositories.append(
+                      {
+                          "name": repo.get("name", ""),
+                          "path": repo.get("path", ""),
+                          "githubSlug": repo.get("github_slug", ""),
+                          "bucket": repo.get("bucket", ""),
+                          "manifestPath": str(manifest_path.relative_to(root)) if manifest_path.exists() else None,
+                          "catalogSlug": manifest.get("slug") if manifest else None,
+                          "manifestHash": digest,
+                          "catalogSourceHash": source_digest,
+                          "syncStatus": status,
+                          "catalogWorkflowStatus": workflow_status if manifest_path.exists() else None,
+                          "catalogWorkflowPath": workflow_path if manifest_path.exists() else None,
+                          "currentCommit": current_commit,
+                          "lastSyncedCommit": sync_evidence.get("commit"),
+                          "lastSyncedManifestHash": sync_evidence.get("manifestHash"),
+                          "lastSyncedSourceHash": sync_evidence.get("sourceHash"),
+                          "lastSyncedAt": sync_evidence.get("syncedAt"),
+                          "dirty": dirty,
+                          "issues": issues,
+                      }
+                  )
+
+              mark_duplicate_catalog_slugs(repositories)
+
+              manifest_count = sum(1 for repo in repositories if repo["syncStatus"] == "manifest-ready")
+              synced_count = sum(1 for repo in repositories if repo["syncStatus"] == "synced")
+              stale_count = sum(1 for repo in repositories if repo["syncStatus"] == "stale-manifest")
+              invalid_count = sum(1 for repo in repositories if repo["syncStatus"] == "invalid-manifest")
+              missing_count = sum(1 for repo in repositories if repo["syncStatus"] == "missing-manifest")
+              duplicate_count = sum(1 for repo in repositories if repo["syncStatus"] == "duplicate-slug")
+              workflow_wired_count = sum(1 for repo in repositories if repo.get("catalogWorkflowStatus") == "wired")
+              workflow_missing_count = sum(1 for repo in repositories if repo.get("catalogWorkflowStatus") == "missing")
+              workflow_custom_count = sum(1 for repo in repositories if repo.get("catalogWorkflowStatus") == "custom")
+
+              return {
+                  "schemaVersion": 1,
+                  "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "source": {
+                      "repoMatrix": str(repo_matrix_path),
+                      "workspaceRoot": str(root),
+                  },
+                  "summary": {
+                      "repoCount": len(repositories),
+                      "manifestCount": manifest_count,
+                      "syncedManifestCount": synced_count,
+                      "staleManifestCount": stale_count,
+                      "missingManifestCount": missing_count,
+                      "invalidManifestCount": invalid_count,
+                      "duplicateSlugCount": duplicate_count,
+                      "catalogWorkflowWiredCount": workflow_wired_count,
+                      "catalogWorkflowMissingCount": workflow_missing_count,
+                      "catalogWorkflowCustomCount": workflow_custom_count,
+                  },
+                  "repositories": repositories,
+              }
+
+
+          def mark_duplicate_catalog_slugs(repositories: list[dict[str, Any]]) -> None:
+              by_slug: dict[str, list[dict[str, Any]]] = {}
+              for repo in repositories:
+                  slug = repo.get("catalogSlug")
+                  if isinstance(slug, str) and slug.strip():
+                      by_slug.setdefault(slug, []).append(repo)
+
+              for slug, matches in by_slug.items():
+                  if len(matches) < 2:
+                      continue
+                  paths = ", ".join(str(repo.get("path", "")) for repo in matches)
+                  issue = f"duplicate catalog slug {slug}: {paths}"
+                  for repo in matches:
+                      repo["syncStatus"] = "duplicate-slug"
+                      issues = repo.setdefault("issues", [])
+                      if isinstance(issues, list) and issue not in issues:
+                          issues.append(issue)
+
+
+          def run_state(args: argparse.Namespace) -> int:
+              repo_matrix_path = Path(args.repo_matrix)
+              workspace_root = Path(args.workspace_root).expanduser() if args.workspace_root else None
+              output_path = Path(args.output)
+              last_synced_state_path = Path(args.last_synced_state) if args.last_synced_state else output_path
+
+              root = workspace_root or Path(str(load_json(repo_matrix_path).get("scan_root", "~/code"))).expanduser()
+              state = build_state_from_matrix(repo_matrix_path, root, last_synced_state_path)
+              output_path.parent.mkdir(parents=True, exist_ok=True)
+              output_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+              summary = state["summary"]
+              print(
+                  "catalog sync state: "
+                  f"{summary['manifestCount']} ready, "
+                  f"{summary['syncedManifestCount']} synced, "
+                  f"{summary['staleManifestCount']} stale, "
+                  f"{summary['invalidManifestCount']} invalid, "
+                  f"{summary['duplicateSlugCount']} duplicate, "
+                  f"{summary['missingManifestCount']} missing"
+              )
+              return 0
+
+
+          def run_suggest(args: argparse.Namespace) -> int:
+              require_explicit_workspace_root(args, "--repo-matrix")
+              repo_matrix_path = Path(args.repo_matrix)
+              repo_matrix = load_json(repo_matrix_path)
+              root = Path(args.workspace_root).expanduser() if args.workspace_root else Path(str(repo_matrix.get("scan_root", "~/code"))).expanduser()
+              repo = find_repo(repo_entries(repo_matrix), args.repo, root)
+              manifest = suggest_manifest(repo, root)
+              manifest_path = repo_path(root, repo) / "polyhydra.project.json"
+
+              _, issues = validate_manifest_payload(manifest)
+              if issues:
+                  for issue in issues:
+                      print(f"invalid generated manifest: {issue}")
+                  return 1
+
+              body = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+              if not args.write:
+                  print(body, end="")
+                  return 0
+
+              project_path = resolve_within_workspace(root, str(repo.get("path", "")))
+              destination = resolve_within_workspace(root, project_path / "polyhydra.project.json")
+
+              if destination.exists() and not args.force:
+                  print(f"manifest already exists: {manifest_path}")
+                  return 2
+
+              write_all_within_workspace(root, [(destination, body)])
+              print(f"wrote {manifest_path}")
+              return 0
+
+
+          def run_manifests(args: argparse.Namespace) -> int:
+              for manifest_path in ready_manifest_paths(args.repo_matrix, args.workspace_root):
+                  print(manifest_path)
+
+              return 0
+
+
+          def run_install_workflow(args: argparse.Namespace) -> int:
+              require_explicit_workspace_root(args, "--repo-matrix")
+              report = install_catalog_workflows(
+                  repo_matrix=args.repo_matrix,
+                  workspace_root=args.workspace_root,
+                  write=args.write,
+                  force=args.force,
+                  limit=args.limit,
+              )
+              output_path = resolve_local_output_path(args.output)
+              output_path.parent.mkdir(parents=True, exist_ok=True)
+              output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+              summary = report["summary"]
+              verb = "installed" if args.write else "would install"
+              print(
+                  "catalog workflow install: "
+                  f"{summary['installedCount']} {verb}, "
+                  f"{summary['skippedCount']} skipped, "
+                  f"{summary['invalidCount']} invalid"
+              )
+              return 0 if summary["invalidCount"] == 0 else 1
+
+
+          def install_catalog_workflows(
+              repo_matrix: str,
+              workspace_root: str | None,
+              write: bool,
+              force: bool,
+              limit: int | None,
+          ) -> dict[str, Any]:
+              repo_matrix_path = Path(repo_matrix)
+              repo_matrix_data = load_json(repo_matrix_path)
+              root = Path(workspace_root).expanduser() if workspace_root else Path(str(repo_matrix_data.get("scan_root", "~/code"))).expanduser()
+              installed: list[dict[str, Any]] = []
+              skipped: list[dict[str, Any]] = []
+              invalid: list[dict[str, Any]] = []
+              entries = repo_entries(repo_matrix_data)
+              # Check every untrusted destination before the first write so a rejected
+              # path aborts the whole run with nothing written anywhere.
+              destinations = [workspace_destination(root, repo.get("path", ""), CATALOG_WORKFLOW_RELATIVE_PATH) for repo in entries] if write else []
+          CATALOG_VALIDATOR_PY_EOF_2
+
+      - name: Stage validator part 3/4
+        run: |
+          set -euo pipefail
+          # Part 3/4 of the embedded copy of tools/catalog_project_sync.py
+          # (stdlib only). Do not edit by hand: python3 tools/catalog_validator_inline.py --write
+          cat >> "${RUNNER_TEMP:-$PWD}/catalog_project_sync_embedded.py" <<'CATALOG_VALIDATOR_PY_EOF_3'
+              # Writes are collected and performed only after every entry is planned.
+              pending_writes: list[tuple[Path, str]] = []
+
+              for index, repo in enumerate(entries):
+                  if limit is not None and len(installed) >= limit:
+                      break
+
+                  path = str(repo.get("path", ""))
+                  project_path = repo_path(root, repo)
+                  manifest_path = project_path / "polyhydra.project.json"
+                  workflow_path = project_path / CATALOG_WORKFLOW_RELATIVE_PATH
+
+                  if not project_path.exists():
+                      skipped.append({"path": path, "reason": "repo path missing"})
+                      continue
+                  if not manifest_path.exists():
+                      continue
+
+                  manifest, issues = validate_manifest(manifest_path)
+                  if issues:
+                      invalid.append({"path": path, "manifestPath": str(manifest_path), "issues": issues})
+                      continue
+
+                  if workflow_path.exists() and workflow_path.read_text(encoding="utf-8", errors="replace") == CATALOG_WORKFLOW_BODY:
+                      skipped.append({"path": path, "reason": "workflow already current", "workflowPath": str(workflow_path)})
+                      continue
+                  if workflow_path.exists() and not force:
+                      skipped.append({"path": path, "reason": "workflow already exists", "workflowPath": str(workflow_path)})
+                      continue
+
+                  entry = {
+                      "path": path,
+                      "slug": manifest.get("slug") if manifest else None,
+                      "workflowPath": str(workflow_path),
+                      "written": write,
+                  }
+                  if write:
+                      pending_writes.append((destinations[index], CATALOG_WORKFLOW_BODY))
+                  installed.append(entry)
+
+              if write:
+                  write_all_within_workspace(root, pending_writes)
+
+              return {
+                  "schemaVersion": 1,
+                  "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "source": {
+                      "repoMatrix": str(repo_matrix_path),
+                      "workspaceRoot": str(root),
+                  },
+                  "write": write,
+                  "force": force,
+                  "summary": {
+                      "installedCount": len(installed),
+                      "skippedCount": len(skipped),
+                      "invalidCount": len(invalid),
+                  },
+                  "installed": installed,
+                  "skipped": skipped,
+                  "invalid": invalid,
+              }
+
+
+          def run_validate(args: argparse.Namespace) -> int:
+              manifest_paths = [Path(path).expanduser() for path in args.manifests]
+              report = validate_manifest_paths(manifest_paths)
+
+              if args.report:
+                  report_path = resolve_local_output_path(args.report)
+                  report_path.parent.mkdir(parents=True, exist_ok=True)
+                  report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+              for entry in report["entries"]:
+                  if entry["valid"]:
+                      print(f"valid {entry['path']}")
+                      continue
+                  print(f"invalid {entry['path']}")
+                  for issue in entry["issues"]:
+                      print(f"  - {issue}")
+
+              summary = report["summary"]
+              print(
+                  "catalog manifest validation: "
+                  f"{summary['valid']} valid, "
+                  f"{summary['invalid']} invalid, "
+                  f"{summary['missing']} missing"
+              )
+              return 0 if summary["invalid"] == 0 and summary["missing"] == 0 else 1
+
+
+          def validate_manifest_paths(manifest_paths: list[Path]) -> dict[str, Any]:
+              entries: list[dict[str, Any]] = []
+              for manifest_path in manifest_paths:
+                  if not manifest_path.exists():
+                      entries.append(
+                          {
+                              "path": str(manifest_path),
+                              "valid": False,
+                              "missing": True,
+                              "slug": None,
+                              "issues": ["manifest file does not exist"],
+                          }
+                      )
+                      continue
+
+                  manifest, issues = validate_manifest(manifest_path)
+                  entries.append(
+                      {
+                          "path": str(manifest_path),
+                          "valid": not issues,
+                          "missing": False,
+                          "slug": manifest.get("slug") if manifest else None,
+                          "issues": issues,
+                      }
+                  )
+
+              return {
+                  "schemaVersion": 1,
+                  "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "summary": {
+                      "count": len(entries),
+                      "valid": sum(1 for entry in entries if entry["valid"]),
+                      "invalid": sum(1 for entry in entries if not entry["valid"] and not entry["missing"]),
+                      "missing": sum(1 for entry in entries if entry["missing"]),
+                  },
+                  "entries": entries,
+              }
+
+
+          def first_wave_manifest_report(priority_path: Path, workspace_root: Path) -> dict[str, Any]:
+              """Validate only the curated first-wave manifests."""
+              priority = load_json(priority_path)
+              entries: list[dict[str, Any]] = []
+              seen_paths: set[str] = set()
+              priority_issues: list[str] = []
+              if priority.get("schemaVersion") != 1:
+                  priority_issues.append("schemaVersion must be 1")
+              first_wave = priority.get("firstWave")
+              if not isinstance(first_wave, list) or not first_wave:
+                  priority_issues.append("firstWave must be a non-empty list")
+                  first_wave = []
+              for index, candidate in enumerate(first_wave):
+                  if not isinstance(candidate, dict):
+                      entries.append({"path": None, "valid": False, "missing": False, "issues": [f"firstWave[{index}] must be an object"]})
+                      continue
+                  path, reason = candidate.get("path"), candidate.get("reason")
+                  issues: list[str] = []
+                  normalized_path: str | None = None
+                  if not isinstance(path, str) or not path.strip():
+                      issues.append("path must be a non-empty relative path")
+                  else:
+                      candidate_path = Path(path)
+                      if candidate_path.is_absolute() or ".." in candidate_path.parts:
+                          issues.append("path must be a relative path within the workspace")
+                      else:
+                          normalized_path = candidate_path.as_posix()
+                          if normalized_path in seen_paths:
+                              issues.append(f"duplicate first-wave path: {normalized_path}")
+                          seen_paths.add(normalized_path)
+                  if not isinstance(reason, str) or not reason.strip():
+                      issues.append("reason must be a non-empty string")
+                  manifest_path = workspace_root / normalized_path / "polyhydra.project.json" if normalized_path else None
+                  missing = manifest_path is not None and not manifest_path.exists()
+                  manifest: dict[str, Any] | None = None
+                  if missing:
+                      issues.append("manifest file does not exist")
+                  elif manifest_path is not None:
+                      manifest, manifest_issues = validate_manifest(manifest_path)
+                      issues.extend(manifest_issues)
+                  entries.append({"path": normalized_path, "reason": reason if isinstance(reason, str) else None,
+                                  "manifestPath": str(manifest_path) if manifest_path else None,
+                                  "slug": manifest.get("slug") if manifest else None, "valid": not issues,
+                                  "missing": missing, "issues": issues})
+              return {"schemaVersion": 1, "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                      "source": {"priorityRepos": str(priority_path), "workspaceRoot": str(workspace_root)},
+                      "priorityIssues": priority_issues,
+                      "summary": {"count": len(entries), "valid": sum(1 for entry in entries if entry["valid"]),
+                                  "invalid": sum(1 for entry in entries if not entry["valid"] and not entry["missing"]),
+                                  "missing": sum(1 for entry in entries if entry["missing"])}, "entries": entries}
+
+
+          def run_first_wave(args: argparse.Namespace) -> int:
+              report = first_wave_manifest_report(Path(args.priority_repos), Path(args.workspace_root).expanduser())
+              if args.report:
+                  report_path = resolve_local_output_path(args.report)
+                  report_path.parent.mkdir(parents=True, exist_ok=True)
+                  report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+              for issue in report["priorityIssues"]:
+                  print(f"invalid priority list: {issue}")
+              for entry in report["entries"]:
+                  print(f"{'valid' if entry['valid'] else 'invalid'} {entry['path'] or '<unknown>'}")
+                  for issue in entry["issues"]:
+                      print(f"  - {issue}")
+              summary = report["summary"]
+              print(f"first-wave catalog manifests: {summary['valid']} valid, {summary['invalid']} invalid, {summary['missing']} missing")
+              return 0 if not report["priorityIssues"] and summary["invalid"] == 0 and summary["missing"] == 0 else 1
+
+
+          def ready_manifest_paths(repo_matrix: str, workspace_root: str | None) -> list[Path]:
+              repo_matrix_path = Path(repo_matrix)
+              repo_matrix_data = load_json(repo_matrix_path)
+              root = Path(workspace_root).expanduser() if workspace_root else Path(str(repo_matrix_data.get("scan_root", "~/code"))).expanduser()
+              paths: list[Path] = []
+
+              for repo in repo_entries(repo_matrix_data):
+                  project_path = repo_path(root, repo)
+                  manifest_path = project_path / "polyhydra.project.json"
+                  if not manifest_path.exists():
+                      continue
+
+                  _, issues = validate_manifest(manifest_path)
+                  if issues:
+                      continue
+
+                  paths.append(manifest_path)
+
+              return paths
+
+
+          def run_import(args: argparse.Namespace) -> int:
+              website_root = Path(args.website_root).expanduser()
+              project_path = website_root / "tools" / "catalog" / "PolyhydraCatalog.Tool"
+              report_path = resolve_local_output_path(args.report)
+              state_output_path = resolve_local_output_path(args.state_output)
+              manifest_paths = ready_manifest_paths(args.repo_matrix, args.workspace_root)
+
+              if not manifest_paths:
+                  print("no valid manifests found")
+                  return 1
+
+              report_path.parent.mkdir(parents=True, exist_ok=True)
+              command = [
+                  "dotnet",
+                  "run",
+                  "--project",
+                  str(project_path),
+                  "--",
+                  "--report",
+                  str(report_path),
+              ]
+              if args.reset:
+                  command.append("--reset")
+
+              for manifest_path in manifest_paths:
+                  command.extend(["--manifest", str(manifest_path)])
+
+              # A previous report cannot describe this attempt. Remove it before invoking
+              # the website tool so an early failure is not accidentally ingested as a
+              # successful, stale result.
+              report_path.unlink(missing_ok=True)
+              result = subprocess.run(command, cwd=str(website_root), text=True)
+
+              # The website tool may emit a structured per-manifest failure report while
+              # returning non-zero. Always ingest a report produced by this attempt so the
+              # workspace state surfaces failed, invalid, and skipped manifests.
+              if report_path.exists():
+                  ingest_import_report(args.repo_matrix, args.workspace_root, report_path, state_output_path)
+              elif result.returncode == 0:
+                  print(f"catalog import report not found: {report_path}")
+                  return 1
+
+              return result.returncode
+
+
+          def run_ingest_report(args: argparse.Namespace) -> int:
+              report_path = resolve_local_output_path(args.report)
+              state_output_path = resolve_local_output_path(args.state_output)
+              if not report_path.exists():
+                  print(f"catalog import report not found: {report_path}")
+                  return 1
+
+              ingest_import_report(args.repo_matrix, args.workspace_root, report_path, state_output_path)
+              return 0
+
+
+          def ingest_import_report(
+              repo_matrix: str,
+              workspace_root: str | None,
+              report_path: Path,
+              state_output_path: Path,
+          ) -> None:
+              report = load_json(report_path)
+              write_synced_state(repo_matrix, workspace_root, state_output_path, report)
+              summary = report.get("summary", {})
+              print(
+                  "catalog import report: "
+                  f"{summary.get('created', 0)} created, "
+                  f"{summary.get('updated', 0)} updated, "
+                  f"{summary.get('skipped', 0)} skipped, "
+                  f"{summary.get('invalid', 0)} invalid, "
+                  f"{summary.get('failed', 0)} failed"
+              )
+
+
+          def run_candidates(args: argparse.Namespace) -> int:
+              repo_matrix_path = Path(args.repo_matrix)
+              repo_matrix_data = load_json(repo_matrix_path)
+              root = Path(args.workspace_root).expanduser() if args.workspace_root else Path(str(repo_matrix_data.get("scan_root", "~/code"))).expanduser()
+              output_path = resolve_local_output_path(args.output)
+              limit = args.limit
+              candidates: list[dict[str, Any]] = []
+              by_bucket: dict[str, int] = {}
+              best_by_identity: dict[str, dict[str, Any]] = {}
+              scratch_skipped = 0
+              duplicate_collapsed = 0
+              manifest_identities = existing_manifest_identities(repo_matrix_data, root)
+
+              for repo in repo_entries(repo_matrix_data):
+                  path = str(repo.get("path", ""))
+                  if is_scratch_repo_path(path):
+                      scratch_skipped += 1
+                      continue
+
+                  project_path = repo_path(root, repo)
+                  manifest_path = project_path / "polyhydra.project.json"
+                  bucket = str(repo.get("bucket", ""))
+                  if manifest_path.exists():
+                      continue
+                  if normalize_repo_identity(repo) in manifest_identities:
+                      duplicate_collapsed += 1
+                      continue
+
+                  by_bucket[bucket] = by_bucket.get(bucket, 0) + 1
+                  score, reasons = adoption_score(repo)
+                  manifest = suggest_manifest(repo, root)
+                  _, issues = validate_manifest_payload(manifest)
+                  candidate = {
+                      "score": score,
+                      "name": repo.get("name", ""),
+                      "path": path,
+                      "githubSlug": repo.get("github_slug", ""),
+                      "bucket": bucket,
+                      "primaryLanguage": repo.get("primary_language", ""),
+                      "lastCommit": repo.get("last_commit", ""),
+                      "dirty": repo.get("dirty", False),
+                      "reasons": reasons,
+                      "suggestedManifest": manifest,
+                      "validationIssues": issues,
+                  }
+                  identity = normalize_repo_identity(repo)
+                  current = best_by_identity.get(identity)
+                  if current is None or candidate_sort_key(candidate) < candidate_sort_key(current):
+                      if current is not None:
+                          duplicate_collapsed += 1
+                      best_by_identity[identity] = candidate
+                  else:
+                      duplicate_collapsed += 1
+
+              candidates = list(best_by_identity.values())
+              candidates.sort(key=lambda entry: (-int(entry["score"]), str(entry["path"]).lower()))
+              selected = candidates[:limit] if limit is not None else candidates
+              report = {
+                  "schemaVersion": 1,
+                  "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "source": {
+                      "repoMatrix": str(repo_matrix_path),
+                      "workspaceRoot": str(root),
+                  },
+                  "summary": {
+                      "eligibleMissingManifestCount": len(candidates),
+                      "candidateCount": len(selected),
+                      "scratchRowSkippedCount": scratch_skipped,
+                      "duplicateIdentityCollapsedCount": duplicate_collapsed,
+                      "invalidSuggestionCount": sum(1 for entry in selected if entry["validationIssues"]),
+                      "missingByBucket": dict(sorted(by_bucket.items())),
+                  },
+                  "candidates": selected,
+              }
+
+              output_path.parent.mkdir(parents=True, exist_ok=True)
+              output_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+              summary = report["summary"]
+              print(
+                  "catalog adoption candidates: "
+                  f"{summary['candidateCount']} written, "
+                  f"{summary['eligibleMissingManifestCount']} eligible missing, "
+                  f"{summary['invalidSuggestionCount']} invalid suggestions"
+              )
+              return 0 if summary["invalidSuggestionCount"] == 0 else 1
+
+
+          def existing_manifest_identities(repo_matrix_data: dict[str, Any], root: Path) -> set[str]:
+              identities: set[str] = set()
+              for repo in repo_entries(repo_matrix_data):
+                  path = str(repo.get("path", ""))
+                  if is_scratch_repo_path(path):
+                      continue
+                  if (repo_path(root, repo) / "polyhydra.project.json").exists():
+                      identities.add(normalize_repo_identity(repo))
+              return identities
+
+
+          def run_promote(args: argparse.Namespace) -> int:
+              require_explicit_workspace_root(args, "--candidate-report")
+              report_path = Path(args.candidate_report)
+              promotion = promote_candidates(
+                  report_path=report_path,
+                  workspace_root=args.workspace_root,
+                  limit=args.limit,
+                  write=args.write,
+                  force=args.force,
+                  include_dirty=args.include_dirty,
+              )
+              output_path = resolve_local_output_path(args.output)
+              output_path.parent.mkdir(parents=True, exist_ok=True)
+              output_path.write_text(json.dumps(promotion, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+              summary = promotion["summary"]
+              verb = "promoted" if args.write else "would promote"
+              print(
+                  "catalog candidate promotion: "
+                  f"{summary['promotedCount']} {verb}, "
+                  f"{summary['skippedCount']} skipped, "
+                  f"{summary['invalidCount']} invalid"
+              )
+              return 0 if summary["invalidCount"] == 0 else 1
+
+
+          def promote_candidates(
+              report_path: Path,
+              workspace_root: str | None,
+              limit: int,
+              write: bool,
+              force: bool,
+              include_dirty: bool,
+          ) -> dict[str, Any]:
+              candidate_report = load_json(report_path)
+              source = candidate_report.get("source", {})
+              root = Path(workspace_root).expanduser() if workspace_root else Path(str(source.get("workspaceRoot", "~/code"))).expanduser()
+              promoted: list[dict[str, Any]] = []
+              skipped: list[dict[str, Any]] = []
+              invalid: list[dict[str, Any]] = []
+              candidates = [candidate for candidate in candidate_report.get("candidates", []) if isinstance(candidate, dict)]
+          CATALOG_VALIDATOR_PY_EOF_3
+
+      - name: Stage validator part 4/4
+        run: |
+          set -euo pipefail
+          # Part 4/4 of the embedded copy of tools/catalog_project_sync.py
+          # (stdlib only). Do not edit by hand: python3 tools/catalog_validator_inline.py --write
+          cat >> "${RUNNER_TEMP:-$PWD}/catalog_project_sync_embedded.py" <<'CATALOG_VALIDATOR_PY_EOF_4'
+              # Check every untrusted destination before the first write so a rejected
+              # path aborts the whole run with nothing written anywhere.
+              destinations = [workspace_destination(root, candidate.get("path", ""), "polyhydra.project.json") for candidate in candidates] if write else []
+              # Writes are collected and performed only after every candidate is planned.
+              pending_writes: list[tuple[Path, str]] = []
+
+              for index, candidate in enumerate(candidates):
+                  if len(promoted) >= limit:
+                      break
+
+                  path = str(candidate.get("path", ""))
+                  project_path = root / path
+                  manifest_path = project_path / "polyhydra.project.json"
+                  manifest = candidate.get("suggestedManifest")
+                  if not isinstance(manifest, dict):
+                      invalid.append({"path": path, "reason": "missing suggestedManifest"})
+                      continue
+
+                  _, issues = validate_manifest_payload(manifest)
+                  if issues:
+                      invalid.append({"path": path, "reason": "invalid suggested manifest", "issues": issues})
+                      continue
+
+                  if not project_path.exists():
+                      skipped.append({"path": path, "reason": "repo path missing"})
+                      continue
+
+                  live_dirty = git_dirty(project_path)
+                  if live_dirty and not include_dirty:
+                      skipped.append({"path": path, "reason": "dirty working tree"})
+                      continue
+
+                  if manifest_path.exists() and not force:
+                      skipped.append({"path": path, "reason": "manifest already exists"})
+                      continue
+
+                  entry = {
+                      "path": path,
+                      "manifestPath": str(manifest_path),
+                      "slug": manifest.get("slug"),
+                      "written": write,
+                  }
+                  if write:
+                      pending_writes.append((destinations[index], json.dumps(manifest, indent=2, sort_keys=True) + "\n"))
+                  promoted.append(entry)
+
+              if write:
+                  write_all_within_workspace(root, pending_writes)
+
+              return {
+                  "schemaVersion": 1,
+                  "generatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                  "candidateReport": str(report_path),
+                  "write": write,
+                  "summary": {
+                      "promotedCount": len(promoted),
+                      "skippedCount": len(skipped),
+                      "invalidCount": len(invalid),
+                  },
+                  "promoted": promoted,
+                  "skipped": skipped,
+                  "invalid": invalid,
+              }
+
+
+          def normalize_repo_identity(repo: dict[str, Any]) -> str:
+              github_slug = str(repo.get("github_slug", "")).lower()
+              return github_slug or str(repo.get("path", "")).lower()
+
+
+          def candidate_sort_key(candidate: dict[str, Any]) -> tuple[int, int, str]:
+              return (
+                  -int(candidate["score"]),
+                  len(str(candidate["path"])),
+                  str(candidate["path"]).lower(),
+              )
+
+
+          def workspace_destination(root: Path, repo_relative_path: Any, file_relative_path: Path | str) -> Path:
+              """Resolve an untrusted repo path and the file to write in it, both inside root."""
+              project_path = resolve_within_workspace(root, str(repo_relative_path))
+              return resolve_within_workspace(root, project_path / file_relative_path)
+
+
+          def resolve_local_output_path(path: str) -> Path:
+              output_path = Path(path).expanduser()
+              return output_path if output_path.is_absolute() else Path.cwd() / output_path
+
+
+          def write_synced_state(
+              repo_matrix: str,
+              workspace_root: str | None,
+              output_path: Path,
+              report: dict[str, Any],
+          ) -> None:
+              repo_matrix_path = Path(repo_matrix)
+              repo_matrix_data = load_json(repo_matrix_path)
+              root = Path(workspace_root).expanduser() if workspace_root else Path(str(repo_matrix_data.get("scan_root", "~/code"))).expanduser()
+              import_outcomes = import_outcomes_by_path(report)
+              state = build_state_from_matrix(repo_matrix_path, root, output_path if output_path.exists() else None)
+              synced_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+              for repo in state["repositories"]:
+                  if not isinstance(repo, dict) or not repo.get("manifestPath"):
+                      continue
+
+                  manifest_path = str(root / str(repo["manifestPath"]))
+                  outcome = import_outcomes.get(manifest_path)
+                  if outcome is None:
+                      continue
+
+                  status = outcome.get("status")
+                  repo["lastImportStatus"] = status
+                  repo["lastImportError"] = outcome.get("error")
+                  if status in {"created", "updated"} and repo.get("syncStatus") in {"manifest-ready", "stale-manifest", "synced"}:
+                      repo["syncStatus"] = "synced"
+                      repo["lastSyncedCommit"] = repo.get("currentCommit")
+                      repo["lastSyncedManifestHash"] = repo.get("manifestHash")
+                      repo["lastSyncedSourceHash"] = repo.get("catalogSourceHash")
+                      repo["lastSyncedAt"] = synced_at
+                      continue
+
+                  if status == "invalid":
+                      repo["syncStatus"] = "invalid-manifest"
+                      append_issue(repo, import_issue_message("catalog import invalid", outcome))
+                  elif status == "failed":
+                      append_issue(repo, import_issue_message("catalog import failed", outcome))
+                  elif status == "skipped":
+                      append_issue(repo, import_issue_message("catalog import skipped", outcome))
+
+              refresh_summary(state)
+              output_path.parent.mkdir(parents=True, exist_ok=True)
+              output_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+          def import_outcomes_by_path(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+              outcomes: dict[str, dict[str, Any]] = {}
+              for entry in report.get("entries", []):
+                  if not isinstance(entry, dict):
+                      continue
+                  path = entry.get("path")
+                  if not isinstance(path, str) or not path.strip():
+                      continue
+                  outcomes[str(Path(path).expanduser())] = entry
+              return outcomes
+
+
+          def import_issue_message(prefix: str, outcome: dict[str, Any]) -> str:
+              error = outcome.get("error")
+              if isinstance(error, str) and error.strip():
+                  return f"{prefix}: {error.strip()}"
+              return prefix
+
+
+          def append_issue(repo: dict[str, Any], issue: str) -> None:
+              issues = repo.setdefault("issues", [])
+              if isinstance(issues, list) and issue not in issues:
+                  issues.append(issue)
+
+
+          def refresh_summary(state: dict[str, Any]) -> None:
+              repositories = [repo for repo in state.get("repositories", []) if isinstance(repo, dict)]
+              state["summary"] = {
+                  "repoCount": len(repositories),
+                  "manifestCount": sum(1 for repo in repositories if repo.get("syncStatus") == "manifest-ready"),
+                  "syncedManifestCount": sum(1 for repo in repositories if repo.get("syncStatus") == "synced"),
+                  "staleManifestCount": sum(1 for repo in repositories if repo.get("syncStatus") == "stale-manifest"),
+                  "missingManifestCount": sum(1 for repo in repositories if repo.get("syncStatus") == "missing-manifest"),
+                  "invalidManifestCount": sum(1 for repo in repositories if repo.get("syncStatus") == "invalid-manifest"),
+                  "duplicateSlugCount": sum(1 for repo in repositories if repo.get("syncStatus") == "duplicate-slug"),
+                  "catalogWorkflowWiredCount": sum(1 for repo in repositories if repo.get("catalogWorkflowStatus") == "wired"),
+                  "catalogWorkflowMissingCount": sum(1 for repo in repositories if repo.get("catalogWorkflowStatus") == "missing"),
+                  "catalogWorkflowCustomCount": sum(1 for repo in repositories if repo.get("catalogWorkflowStatus") == "custom"),
+              }
+
+
+          WRITE_WORKSPACE_ROOT_HELP = (
+              "workspace root that every write must stay inside; required with --write "
+              "(read-only runs fall back to the root named in the input file)"
+          )
+
+
+          def main(argv: list[str] | None = None) -> int:
+              argv = list(sys.argv[1:] if argv is None else argv)
+              if not argv or argv[0].startswith("-"):
+                  argv.insert(0, "state")
+
+              parser = argparse.ArgumentParser(description=__doc__)
+              subparsers = parser.add_subparsers(dest="command")
+
+              state_parser = subparsers.add_parser("state", help="write workspace catalog sync state")
+              state_parser.add_argument("--repo-matrix", default="data/repo-inventory/repo-matrix.json")
+              state_parser.add_argument("--workspace-root")
+              state_parser.add_argument("--output", default="data/catalog-sync/catalog-sync-state.json")
+              state_parser.add_argument("--last-synced-state")
+              state_parser.set_defaults(func=run_state)
+
+              suggest_parser = subparsers.add_parser("suggest", help="suggest or write a starter project manifest")
+              suggest_parser.add_argument("repo", help="repo name, path, or GitHub slug from the repo matrix")
+              suggest_parser.add_argument("--repo-matrix", default="data/repo-inventory/repo-matrix.json")
+              suggest_parser.add_argument("--workspace-root", help=WRITE_WORKSPACE_ROOT_HELP)
+              suggest_parser.add_argument("--write", action="store_true")
+              suggest_parser.add_argument("--force", action="store_true")
+              suggest_parser.set_defaults(func=run_suggest)
+
+              manifests_parser = subparsers.add_parser("manifests", help="print valid manifest paths from the repo matrix")
+              manifests_parser.add_argument("--repo-matrix", default="data/repo-inventory/repo-matrix.json")
+              manifests_parser.add_argument("--workspace-root")
+              manifests_parser.set_defaults(func=run_manifests)
+
+              install_workflow_parser = subparsers.add_parser("install-workflow", help="install catalog validation workflow into repos with valid manifests")
+              install_workflow_parser.add_argument("--repo-matrix", default="data/repo-inventory/repo-matrix.json")
+              install_workflow_parser.add_argument("--workspace-root", help=WRITE_WORKSPACE_ROOT_HELP)
+              install_workflow_parser.add_argument("--output", default="data/catalog-sync/catalog-workflow-install-report.json")
+              install_workflow_parser.add_argument("--limit", type=int)
+              install_workflow_parser.add_argument("--write", action="store_true")
+              install_workflow_parser.add_argument("--force", action="store_true")
+              install_workflow_parser.set_defaults(func=run_install_workflow)
+
+              validate_parser = subparsers.add_parser("validate", help="validate one or more project manifests")
+              validate_parser.add_argument("manifests", nargs="+", help="polyhydra.project.json path(s)")
+              validate_parser.add_argument("--report", help="optional JSON validation report path")
+              validate_parser.set_defaults(func=run_validate)
+
+              first_wave_parser = subparsers.add_parser("first-wave", help="validate every curated first-wave manifest")
+              first_wave_parser.add_argument("--priority-repos", default="data/catalog-sync/priority-repos.json")
+              first_wave_parser.add_argument("--workspace-root", default="~/code")
+              first_wave_parser.add_argument("--report", help="optional JSON validation report path")
+              first_wave_parser.set_defaults(func=run_first_wave)
+
+              import_parser = subparsers.add_parser("import", help="run the website catalog import tool for valid manifests")
+              import_parser.add_argument("--repo-matrix", default="data/repo-inventory/repo-matrix.json")
+              import_parser.add_argument("--workspace-root")
+              import_parser.add_argument("--website-root", default="~/code/Website-PolyhydragamesCom")
+              import_parser.add_argument("--report", default="data/catalog-sync/catalog-import-report.json")
+              import_parser.add_argument("--state-output", default="data/catalog-sync/catalog-sync-state.json")
+              import_parser.add_argument("--reset", action="store_true")
+              import_parser.set_defaults(func=run_import)
+
+              ingest_parser = subparsers.add_parser("ingest-report", help="ingest an existing website catalog import report")
+              ingest_parser.add_argument("--repo-matrix", default="data/repo-inventory/repo-matrix.json")
+              ingest_parser.add_argument("--workspace-root")
+              ingest_parser.add_argument("--report", default="data/catalog-sync/catalog-import-report.json")
+              ingest_parser.add_argument("--state-output", default="data/catalog-sync/catalog-sync-state.json")
+              ingest_parser.set_defaults(func=run_ingest_report)
+
+              candidates_parser = subparsers.add_parser("candidates", help="write ranked manifest adoption candidates")
+              candidates_parser.add_argument("--repo-matrix", default="data/repo-inventory/repo-matrix.json")
+              candidates_parser.add_argument("--workspace-root")
+              candidates_parser.add_argument("--output", default="data/catalog-sync/catalog-adoption-candidates.json")
+              candidates_parser.add_argument("--limit", type=int, default=40)
+              candidates_parser.set_defaults(func=run_candidates)
+
+              promote_parser = subparsers.add_parser("promote", help="promote ranked candidates into repo manifests")
+              promote_parser.add_argument("--candidate-report", default="data/catalog-sync/catalog-adoption-candidates.json")
+              promote_parser.add_argument("--workspace-root", help=WRITE_WORKSPACE_ROOT_HELP)
+              promote_parser.add_argument("--output", default="data/catalog-sync/catalog-promotion-report.json")
+              promote_parser.add_argument("--limit", type=int, default=5)
+              promote_parser.add_argument("--write", action="store_true")
+              promote_parser.add_argument("--force", action="store_true")
+              promote_parser.add_argument("--include-dirty", action="store_true")
+              promote_parser.set_defaults(func=run_promote)
+
+              args = parser.parse_args(argv)
+              try:
+                  return args.func(args)
+              except (WorkspaceEscapeError, InputJSONError) as exc:
+                  print(f"error: {exc}", file=sys.stderr)
+                  return 1
+
+
+          if __name__ == "__main__":
+              raise SystemExit(main())
+          CATALOG_VALIDATOR_PY_EOF_4
+
+      - name: Validate manifest
+        env:
+          MANIFEST_PATH: polyhydra.project.json
+          REPORT_PATH: catalog-manifest-validation.json
+        run: |
+          set -euo pipefail
+          python3 "${RUNNER_TEMP:-$PWD}/catalog_project_sync_embedded.py" validate \
+            "caller-repo/${MANIFEST_PATH}" \
+            --report "caller-repo/${REPORT_PATH}"
+
+      - name: Upload validation report
+        if: always()
+        # The report is diagnostic; quota exhaustion must not mask validation success.
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: catalog-manifest-validation
+          path: caller-repo/catalog-manifest-validation.json
+          if-no-files-found: ignore
+          retention-days: 7
